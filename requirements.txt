@@ -1,0 +1,10 @@
+# Reference simulator (stable, CPU): used for Stage 1 embodiment validation.
+mujoco>=3.2.0
+numpy
+pyyaml
+
+# --- Newton path (Windows + NVIDIA GPU, CUDA 12.x, driver 545+) ---
+# Uncomment on the Windows training box:
+# newton
+# warp-lang
+# usd-core

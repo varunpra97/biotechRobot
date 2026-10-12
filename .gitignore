@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+assets/
+data/
+*.npz
+*.usd
+MUJOCO_LOG.TXT
+.DS_Store
