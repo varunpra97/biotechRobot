@@ -1,22 +1,22 @@
-"""Biotech lab scene in Isaac Sim: 4 chambers, dual-arm mobile platform, 15 cameras.
+"""Simplified biotech lab: 1 chamber, 1 fixed arm, 5 cameras.
 
-Room (10m x 6m x 3m) with 4 biosafety-style chambers (2 per side, facing a
-central 2m walkway). Each chamber has a pull-up window (posed open), latch,
-test tube rack (3x4), 2 plungers, and a sample tray. A STATIONARY mobile
-platform in front of the north-east chamber carries 2 Franka arms (both on
-the chamber-facing side of the deck) for simultaneous dual-arm work.
+Room (10m x 6m x 3m) with a single large biosafety-style chamber
+(3.0m wide x 2.0m deep, 1.5m work zone, open front — no window).
+Chamber contents: 3x4 test tube rack, 2 plungers, sample tray with wells.
+One fixed Franka arm on a pedestal in front of the chamber.
 
-Cameras (15 total):
-  - 8 chamber cameras (2 per chamber, looking at the work surface)
-  - 2 wrist cameras (static viewpoints overlooking each arm)
-  - 1 platform camera (static, views both arms on the deck)
-  - 4 room corner cameras (1280x960, watch the mobile base)
+Cameras (5 total):
+  - 2 inside the chamber (back corners, pointing out at the arm)
+  - 2 in the room behind the robot (pointing at arm + chamber opening)
+  - 1 wrist camera (follows the end effector)
+
+Lighting: DomeLight + interior RectLight (same as before).
 
 Usage (Isaac venv, repo root on Windows box):
     python sim\\lab_scene.py                  # GUI, animated
     python sim\\lab_scene.py --headless       # one animated pass, no window
-    python sim\\lab_scene.py --capture        # save PNGs from all 15 cameras
-    python sim\\lab_scene.py --camera wrist0  # GUI, viewport starts at wrist0
+    python sim\\lab_scene.py --capture        # save PNGs from all 5 cameras
+    python sim\\lab_scene.py --camera wrist   # GUI, viewport starts at wrist
     python sim\\lab_scene.py --list-cameras   # print camera names and exit
 """
 from __future__ import annotations
@@ -29,13 +29,12 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # Layout constants
 # ----------------------------------------------------------------------------
-ROOM_X, ROOM_Y, ROOM_Z = 10.0, 6.0, 3.0      # room size (m)
-WALKWAY_HALF = 1.0                            # walkway |y| < 1
-CHAMBER_W, CHAMBER_D, CHAMBER_H = 2.6, 1.6, 2.1
-BENCH_Z = 0.9                                 # work surface height
-WORK_H = 1.2                                  # work zone height (BENCH_Z → BENCH_Z+WORK_H)
-CHAMBER_XS = (-2.5, 2.5)                      # chamber centers along x
-CHAMBER_Y = 2.4                               # |y| center (front face at 1.8)
+ROOM_X, ROOM_Y, ROOM_Z = 10.0, 6.0, 3.0
+CHAMBER_W, CHAMBER_D = 3.0, 2.0       # wide x deep
+BENCH_Z = 0.9                          # work surface height
+WORK_H = 1.5                           # work zone height
+CHAMBER_CX, CHAMBER_CY = 0.0, 2.5      # chamber center (front faces -y)
+ARM_POS = (0.0, 0.6, 0.45)             # fixed arm base (0.9m in front)
 
 FRANKA_USD = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
@@ -54,7 +53,7 @@ def smooth(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------------
-# Scene construction (USD-level helpers)
+# Scene construction
 # ----------------------------------------------------------------------------
 def _box(stage_utils, UsdGeom, Gf, path, size, pos, color=None):
     from isaacsim.core.experimental.objects import Cube
@@ -62,7 +61,6 @@ def _box(stage_utils, UsdGeom, Gf, path, size, pos, color=None):
     c = Cube(
         paths=path,
         positions=np.array(pos, dtype=float),
-        orientations=np.array([1, 0, 0, 0]),
         sizes=1.0,
         scales=np.array(size, dtype=float),
         colors=color or "white",
@@ -70,67 +68,18 @@ def _box(stage_utils, UsdGeom, Gf, path, size, pos, color=None):
     return c
 
 
-def _cylinder(stage_utils, UsdGeom, Gf, path, radius, height, pos, color=None,
-              axis="z"):
-    """Cylinder via USD (Isaac Cylinders are z-aligned by default)."""
-    from pxr import UsdGeom as UG
-
-    stage = stage_utils.get_current_stage()
-    cyl = UG.Cylinder.Define(stage, path)
-    cyl.GetRadiusAttr().Set(float(radius))
-    cyl.GetHeightAttr().Set(float(height))
-    if axis == "x":
-        cyl.AddRotateXOp().Set(90.0)
-    elif axis == "y":
-        cyl.AddRotateYOp().Set(90.0)
-    xform = UG.Xformable(cyl)
-    # ensure translate op exists
-    xform.AddTranslateOp().Set(Gf.Vec3d(*pos))
-    if color:
-        from pxr import UsdShade
-
-        mat_path = f"/World/Materials/{color}"
-        # simple display color instead of full material
-        cyl.GetDisplayColorAttr().Set([(0.8, 0.8, 0.8)])
-    return cyl
-
-
-def build_room():
-    """Floor, walls, ceiling."""
-    _box(None, None, None, "/World/Room/Floor", (ROOM_X, ROOM_Y, 0.1),
-         (0, 0, -0.05), "lightgray")
-    # walls: north/south (along x), east/west (along y)
-    _box(None, None, None, "/World/Room/WallN", (ROOM_X, 0.1, ROOM_Z),
-         (0, ROOM_Y / 2, ROOM_Z / 2), "white")
-    _box(None, None, None, "/World/Room/WallS", (ROOM_X, 0.1, ROOM_Z),
-         (0, -ROOM_Y / 2, ROOM_Z / 2), "white")
-    _box(None, None, None, "/World/Room/WallE", (0.1, ROOM_Y, ROOM_Z),
-         (ROOM_X / 2, 0, ROOM_Z / 2), "white")
-    _box(None, None, None, "/World/Room/WallW", (0.1, ROOM_Y, ROOM_Z),
-         (-ROOM_X / 2, 0, ROOM_Z / 2), "white")
-    # NOTE: no ceiling panel — a closed ceiling blocks the DomeLight and the
-    # RTX render products return blank. Open top; walls go to 3 m.
-
-
-def build_chamber(idx, cx, cy, facing):
-    """One chamber: base cabinet, enclosure (open front, no window), props.
-
-    facing = +1 → front faces +y (south chambers); -1 → faces -y (north).
-    Front is fully open (no sash/window) for an unobstructed camera view.
-    """
-    root = f"/World/Chambers/Ch{idx}"
-    fx = cx  # front-center x
-    fz0 = BENCH_Z
-    # base cabinet (0 → bench)
+def build_chamber(cx, cy):
+    """Single large chamber: base, open-front enclosure, props, interior light."""
+    root = "/World/Chamber"
+    # base cabinet + work surface
     _box(None, None, None, f"{root}/Base", (CHAMBER_W, CHAMBER_D, BENCH_Z),
          (cx, cy, BENCH_Z / 2), "gray")
-    # work surface slab
     _box(None, None, None, f"{root}/Bench", (CHAMBER_W, CHAMBER_D, 0.04),
          (cx, cy, BENCH_Z + 0.02), "white")
-    # back / side / top panels (work zone BENCH_Z → BENCH_Z+WORK_H)
+    # back / side / top panels (front fully open — no window/header)
     wz = BENCH_Z + WORK_H / 2
     _box(None, None, None, f"{root}/Back",
-         (CHAMBER_W, 0.05, WORK_H), (cx, cy - facing * (CHAMBER_D / 2 - 0.025), wz),
+         (CHAMBER_W, 0.05, WORK_H), (cx, cy + CHAMBER_D / 2 - 0.025, wz),
          "lightgray")
     _box(None, None, None, f"{root}/SideL",
          (0.05, CHAMBER_D, WORK_H), (cx - CHAMBER_W / 2 + 0.025, cy, wz),
@@ -140,13 +89,11 @@ def build_chamber(idx, cx, cy, facing):
          "lightgray")
     _box(None, None, None, f"{root}/Top",
          (CHAMBER_W, CHAMBER_D, 0.05), (cx, cy, BENCH_Z + WORK_H), "lightgray")
-    # Front is FULLY OPEN — no header, no window glass, no latch.
-    # (Removed per user request for unobstructed inside-out camera view.)
 
-    # ---- props on the work surface (z = BENCH_Z + 0.04) ----
+    # ---- props on the work surface ----
     pz = BENCH_Z + 0.04
-    # test tube rack 3x4 at local (-0.55, 0)
-    rx, ry = cx - 0.55, cy
+    # test tube rack 3x4
+    rx, ry = cx - 0.75, cy
     _box(None, None, None, f"{root}/Rack",
          (0.36, 0.26, 0.05), (rx, ry, pz + 0.025), "darkgray")
     for r in range(3):
@@ -155,15 +102,15 @@ def build_chamber(idx, cx, cy, facing):
             ty = ry - 0.08 + r * 0.08
             _box(None, None, None, f"{root}/Tube_{r}_{c_}",
                  (0.03, 0.03, 0.11), (tx, ty, pz + 0.05 + 0.055), "lightblue")
-    # 2 plungers (pipettes) lying at local (0.0, ±0.25)
+    # 2 plungers
     for i, off in enumerate((-0.25, 0.25)):
         px, py = cx + 0.0, cy + off
         _box(None, None, None, f"{root}/Plunger{i}_body",
              (0.22, 0.025, 0.025), (px, py, pz + 0.02), "white")
         _box(None, None, None, f"{root}/Plunger{i}_tip",
              (0.06, 0.012, 0.012), (px + 0.14, py, pz + 0.015), "gray")
-    # sample tray with wells at local (+0.55, 0)
-    tx, ty = cx + 0.55, cy
+    # sample tray with wells
+    tx, ty = cx + 0.75, cy
     _box(None, None, None, f"{root}/Tray",
          (0.34, 0.24, 0.035), (tx, ty, pz + 0.017), "blue")
     for r in range(2):
@@ -173,23 +120,17 @@ def build_chamber(idx, cx, cy, facing):
             _box(None, None, None, f"{root}/Well_{r}_{c_}",
                  (0.05, 0.05, 0.038), (wx, wy, pz + 0.019), "darkblue")
 
-    # interior light: rect light under the top panel, illuminates work surface
-    # (chambers are enclosed; DomeLight alone leaves them dark)
+    # interior RectLight under the top panel
     from pxr import UsdLux, UsdGeom, Gf
     import isaacsim.core.experimental.utils.stage as _su
     _stage = _su.get_current_stage()
     _light = UsdLux.RectLight.Define(_stage, f"{root}/InteriorLight")
     _light.GetIntensityAttr().Set(1000.0)
-    _light.GetWidthAttr().Set(1.8)
-    _light.GetHeightAttr().Set(1.0)
+    _light.GetWidthAttr().Set(2.0)
+    _light.GetHeightAttr().Set(1.2)
     _lx = UsdGeom.Xformable(_light)
     _lx.ClearXformOpOrder()
-    # position under top panel, rotate to point down (-Z -> -Z is default;
-    # RectLight shines along -Z, so translate only)
     _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + WORK_H - 0.08))
-
-    # return work-surface focus point for cameras
-    return (cx, cy, pz + 0.1)
 
 
 def main():
@@ -199,55 +140,41 @@ def main():
                     help="save PNGs from all cameras and exit")
     ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\lab_captures")
     ap.add_argument("--camera", default=None,
-                    help="GUI mode: set viewport to this camera on startup. "
-                         "One of: chamber0_cam0, chamber0_cam1, ..., chamber3_cam1, "
-                         "wrist0, wrist1, platform, corner0..corner3")
+                    help="GUI mode: set viewport to this camera on startup")
     ap.add_argument("--list-cameras", action="store_true",
                     help="print camera names and exit")
     args = ap.parse_args()
 
     from isaacsim import SimulationApp
-
     simulation_app = SimulationApp({"headless": args.headless or args.capture})
 
-    import isaacsim.core.experimental.utils.stage as stage_utils
-    from isaacsim.core.experimental.objects import DomeLight
-    from isaacsim.core.utils.stage import add_reference_to_stage
-    from isaacsim.core.experimental.prims import Articulation
     from pxr import Gf, UsdGeom
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from isaacsim.core.utils.stage import add_reference_to_stage
+    from isaacsim.core.experimental.objects import DomeLight
+    from isaacsim.core.prims import Articulation
 
+    # ---------------- room ----------------
+    _box(None, None, None, "/World/Floor", (ROOM_X, ROOM_Y, 0.1),
+         (0, 0, -0.05), "lightgray")
+    # walls (no ceiling — open top for DomeLight)
+    _box(None, None, None, "/World/WallN", (ROOM_X, 0.1, ROOM_Z),
+         (0, ROOM_Y / 2, ROOM_Z / 2), "white")
+    _box(None, None, None, "/World/WallS", (ROOM_X, 0.1, ROOM_Z),
+         (0, -ROOM_Y / 2, ROOM_Z / 2), "white")
+    _box(None, None, None, "/World/WallE", (0.1, ROOM_Y, ROOM_Z),
+         (ROOM_X / 2, 0, ROOM_Z / 2), "white")
+    _box(None, None, None, "/World/WallW", (0.1, ROOM_Y, ROOM_Z),
+         (-ROOM_X / 2, 0, ROOM_Z / 2), "white")
     DomeLight("/World/DomeLight").set_intensities(1500)
 
-    build_room()
-    chamber_focus = []
-    idx = 0
-    for cx in CHAMBER_XS:
-        chamber_focus.append(build_chamber(idx, cx, CHAMBER_Y, -1))
-        idx += 1
-        chamber_focus.append(build_chamber(idx, cx, -CHAMBER_Y, +1))
-        idx += 1
+    # ---------------- chamber ----------------
+    build_chamber(CHAMBER_CX, CHAMBER_CY)
 
-    # ---------------- mobile platform + 2 Franka arms ----------------
-    # Platform STATIONARY in front of north-east chamber (2.5, 2.4).
-    # Chamber front face at y=1.8; platform at y=0.9 gives 0.9m clearance.
-    PLAT_X, PLAT_Y = 2.5, 0.9
-    _box(None, None, None, "/World/Platform/Base", (1.4, 0.9, 0.22),
-         (PLAT_X, PLAT_Y, 0.28), "darkgray")
-    _box(None, None, None, "/World/Platform/Deck", (1.3, 0.8, 0.06),
-         (PLAT_X, PLAT_Y, 0.42), "yellow")
-    for i, wx in enumerate((-0.5, 0.5)):
-        for j, wy in enumerate((-0.3, 0.3)):
-            _box(None, None, None, f"/World/Platform/Wheel{i}_{j}",
-                 (0.18, 0.1, 0.18), (PLAT_X + wx, PLAT_Y + wy, 0.09), "black")
-
-    arm_paths = ["/World/Arm0", "/World/Arm1"]
-    # Both arms ON TOP of the platform deck (z=0.45), on the +y side
-    # (facing the chamber at y=2.4) so they can work on it simultaneously.
-    # Deck is 0.8 wide in y (y in [0.5, 1.3] at PLAT_Y=0.9); arms at y=1.05, 1.20.
-    arm_pos = [(PLAT_X - 0.25, PLAT_Y + 0.15, 0.45),
-               (PLAT_X + 0.25, PLAT_Y + 0.15, 0.45)]
-    for p in arm_paths:
-        add_reference_to_stage(usd_path=FRANKA_USD, prim_path=p)
+    # ---------------- fixed arm on pedestal ----------------
+    _box(None, None, None, "/World/Pedestal", (0.5, 0.5, ARM_POS[2]),
+         (ARM_POS[0], ARM_POS[1], ARM_POS[2] / 2), "darkgray")
+    add_reference_to_stage(usd_path=FRANKA_USD, prim_path="/World/Arm")
 
     def set_prim_world(path, pos):
         prim = stage_utils.get_current_stage().GetPrimAtPath(path)
@@ -255,81 +182,71 @@ def main():
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
 
-    for p, pos in zip(arm_paths, arm_pos):
-        set_prim_world(p, pos)
+    set_prim_world("/World/Arm", ARM_POS)
 
-    # ---------------- cameras (Replicator look_at for orientation + Camera for capture) ----------------
-    # Replicator's look_at correctly orients the USD camera prim.
-    # The isaacsim Camera class then captures from that prim (reads USD transform).
+    # ---------------- cameras ----------------
     import omni.replicator.core as rep
     from isaacsim.sensors.camera import Camera
 
-    # helper: create a Replicator camera with look_at, return (prim_path, Camera)
-    # focal_length: shorter = wider FOV (default 24 ≈ 47°; 14 ≈ 73° wide)
     def aim(name, eye, target, res, focal_length=24.0):
         rep.create.camera(position=tuple(eye), look_at=tuple(target), name=name,
                           focal_length=focal_length)
-        # Rep creates /Replicator/{name}_Xform/{name} (Xform containing Camera)
         prim_path = f"/Replicator/{name}_Xform/{name}"
         cam = Camera(prim_path, resolution=res)
         cam.initialize()
         return (prim_path, cam)
 
-    cams = {}  # name -> (prim_path, Camera)
-    # 8 chamber cameras (2 per chamber): INSIDE at the back, pointing OUT.
-    # Wide FOV (focal 14) to capture the full chamber interior, opening,
-    # and arms outside. Chamber 1 has the dual-arm platform in front.
-    for i, (fx, fy, fz) in enumerate(chamber_focus):
-        facing = -1 if fy > 0 else 1  # north chambers face -y
-        for j, sx in enumerate((-0.3, 0.3)):
-            # Back of chamber (0.2m from back wall), upper work zone
-            eye = (fx + sx, fy - facing * (CHAMBER_D / 2 - 0.2),
-                   BENCH_Z + WORK_H * 0.7)
-            # Out through the opening, toward the walkway/arms
-            target = (fx, fy + facing * 2.5, BENCH_Z + 0.2)
-            name = f"chamber{i}_cam{j}"
-            cams[name] = aim(name, eye, target, (640, 480), focal_length=14.0)
-    # 1 platform camera (static, views both arms on the deck)
-    cams["platform"] = aim("platform",
-                           (PLAT_X + 1.5, PLAT_Y - 1.2, 1.6),
-                           (PLAT_X, PLAT_Y + 0.15, 0.7), (640, 480))
-    # 4 corner cameras (high-res, watch the mobile base at its fixed spot)
-    corners = [(-4.7, -2.7), (4.7, -2.7), (-4.7, 2.7), (4.7, 2.7)]
-    for k, (cx_, cy_) in enumerate(corners):
-        name = f"corner{k}"
-        eye = (cx_, cy_, 2.8)
-        cams[name] = aim(name, eye, (PLAT_X, PLAT_Y, 0.5), (1280, 960))
-    # 2 wrist cameras — STATIC viewpoints overlooking each arm
-    # Arms at (2.25, 1.05) and (2.75, 1.05); cameras look down at them.
-    for w, (ax, ay, az) in enumerate(arm_pos):
-        eye = (ax + 0.9, ay - 0.7, 1.7)
-        tgt = (ax, ay, 0.7)
-        cams[f"wrist{w}"] = aim(f"wrist{w}", eye, tgt, (640, 480))
+    cams = {}
+    cx, cy = CHAMBER_CX, CHAMBER_CY
+    # 2 inside the chamber (back corners, pointing out at the arm)
+    # Back wall at cy + D/2 = 3.5; cameras 0.2m in front of it
+    for j, sx in enumerate((-1.2, 1.2)):
+        eye = (cx + sx, cy + CHAMBER_D / 2 - 0.2, BENCH_Z + WORK_H * 0.7)
+        target = (ARM_POS[0], ARM_POS[1], ARM_POS[2] + 0.3)
+        cams[f"chamber_cam{j}"] = aim(f"chamber_cam{j}", eye, target,
+                                      (640, 480), focal_length=14.0)
+    # 2 in the room behind the robot (opposite view: arm + chamber opening)
+    for j, sx in enumerate((-1.5, 1.5)):
+        eye = (ARM_POS[0] + sx, ARM_POS[1] - 1.6, 1.8)
+        target = (cx, cy - CHAMBER_D / 2, BENCH_Z + 0.3)
+        cams[f"room_cam{j}"] = aim(f"room_cam{j}", eye, target, (640, 480))
+    # 1 wrist camera (follows end effector; positioned per-frame below)
+    # Initial guess: above the arm
+    cams["wrist"] = aim("wrist",
+                        (ARM_POS[0] + 0.5, ARM_POS[1] - 0.5, 1.5),
+                        (ARM_POS[0], ARM_POS[1], 0.8), (640, 480))
 
-    # ---------------- start physics + articulations (after cameras) ----------------
+    print(f"scene ready: 1 chamber, 1 arm, {len(cams)} cameras")
+
+    # ---------------- physics ----------------
     import omni.timeline
-
     omni.timeline.get_timeline_interface().play()
     for _ in range(5):
         simulation_app.update()
 
-    arms = [Articulation(p) for p in arm_paths]
-    for a in arms:
-        a.set_dof_positions(Q_A)
-        a.set_dof_position_targets(Q_A)
+    arm = Articulation("/World/Arm")
+    arm.set_joint_positions(Q_A)
+    arm.set_joint_position_targets(Q_A)
 
-    print(f"scene ready: 4 chambers, 2 arms, {len(cams)} cameras")
+    # Wrist camera follows the hand (update Replicator Xform per-frame)
+    wrist_xform_path = "/Replicator/wrist_Xform"
+    hand_path = "/World/Arm/Geometry/link0/link1/link2/link3/link4/link5/link6/link7/hand"
 
-    # Platform camera Xform path (rep camera name="platform")
-    # The Xform holds the transform; the Camera child is at .../platform
-    _plat_path = "/Replicator/platform_Xform"
+    def get_hand_world():
+        prim = stage_utils.get_current_stage().GetPrimAtPath(hand_path)
+        if not prim.IsValid():
+            return np.array(ARM_POS)
+        m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+            omni.timeline.get_timeline_interface().get_current_time())
+        return np.array([m[3][0], m[3][1], m[3][2]])
 
-    def aim_rep_camera(prim_path, eye, target):
-        # Update a Replicator camera's USD transform (rep reads from USD)
-        prim = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+    def aim_wrist():
+        hw = get_hand_world()
+        # Camera 15cm behind-above the hand, looking at the hand
+        eye = hw + np.array([-0.25, -0.25, 0.20])
+        target = hw
+        prim = stage_utils.get_current_stage().GetPrimAtPath(wrist_xform_path)
         xf = UsdGeom.Xformable(prim)
-        eye = np.array(eye, dtype=float)
-        target = np.array(target, dtype=float)
         f = target - eye; f /= np.linalg.norm(f)
         up = np.array([0.0, 0.0, 1.0])
         r = np.cross(f, up); r /= np.linalg.norm(r)
@@ -343,28 +260,20 @@ def main():
 
     # ---------------- animation / capture ----------------
     from PIL import Image
-
     out_dir = Path(args.out)
-    n_steps = 0
 
     def step_scene(t):
-        # Platform is STATIONARY (fixed at PLAT_X, PLAT_Y in front of chamber).
-        # Arms stay mounted on the deck; gentle keyframe loop (phase-offset).
-        for ai, a in enumerate(arms):
-            a.set_world_poses(
-                positions=np.array(arm_pos[ai]),
-                orientations=np.array([1.0, 0.0, 0.0, 0.0]))
-            ph = (t * 0.25 + ai * 0.5) % 1.5
-            if ph < 0.5:
-                q = smooth(Q_A, Q_B, ph / 0.5)
-            elif ph < 1.0:
-                q = smooth(Q_B, Q_C, ph - 0.5)
-            else:
-                q = smooth(Q_C, Q_A, ph - 1.0)
-            a.set_dof_position_targets(q)
-        # platform camera follows platform (update Replicator camera USD transform)
-        # platform camera is static (platform doesn't move); aimed at arms once at creation
-        # wrist cameras are static (see creation above); no per-frame update
+        # Gentle arm keyframe loop
+        ph = (t * 0.25) % 1.5
+        if ph < 0.5:
+            q = smooth(Q_A, Q_B, ph / 0.5)
+        elif ph < 1.0:
+            q = smooth(Q_B, Q_C, ph - 0.5)
+        else:
+            q = smooth(Q_C, Q_A, ph - 1.0)
+        arm.set_joint_position_targets(q)
+        # Wrist camera tracks the hand
+        aim_wrist()
 
     def capture(tag):
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -383,7 +292,6 @@ def main():
         return
 
     if args.capture:
-        # Platform is stationary; capture at 3 different arm poses (t=0, 10, 20s)
         for k, tt in enumerate([0.0, 10.0, 20.0]):
             step_scene(tt)
             for _ in range(20):
@@ -396,7 +304,6 @@ def main():
             simulation_app.update()
         print("HEADLESS RUN OK")
     else:
-        # GUI mode: optionally set viewport to requested camera
         if args.camera:
             if args.camera not in cams:
                 print(f"Unknown camera '{args.camera}'. Available:")
@@ -408,10 +315,9 @@ def main():
                     import omni.kit.viewport.utility as vpu
                     vp = vpu.get_active_viewport()
                     vp.set_active_camera(prim_path)
-                    print(f"Viewport set to camera: {args.camera} ({prim_path})")
+                    print(f"Viewport set to camera: {args.camera}")
                 except Exception as e:
-                    print(f"Could not set viewport camera: {e}")
-                    print(f"Tip: in the GUI, use the viewport's camera dropdown and pick {prim_path}")
+                    print(f"Could not set viewport: {e}")
         t = 0.0
         while simulation_app.is_running():
             step_scene(t)
