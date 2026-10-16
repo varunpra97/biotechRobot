@@ -4,6 +4,8 @@ Room (10m x 6m x 3m) with a single large biosafety-style chamber
 (3.0m wide x 2.0m deep, 1.5m work zone, open front — no window).
 Chamber contents: 3x4 test tube rack, 2 plungers, sample tray with wells.
 One fixed Franka arm on a pedestal in front of the chamber.
+The arm performs a pick-and-place: picks the tube at the chamber entrance
+and places it at a different spot inside.
 
 Cameras (5 total):
   - 2 inside the chamber (back corners, pointing out at the arm)
@@ -34,7 +36,7 @@ CHAMBER_W, CHAMBER_D = 3.0, 2.0       # wide x deep
 BENCH_Z = 0.9                          # work surface height
 WORK_H = 1.5                           # work zone height
 CHAMBER_CX, CHAMBER_CY = 0.0, 2.5      # chamber center (front faces -y)
-ARM_POS = (0.0, 0.6, BENCH_Z)          # fixed arm base, level with work surface
+ARM_POS = (0.0, 1.1, BENCH_Z)          # fixed arm base, 0.4m in front of chamber
 
 FRANKA_USD = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
@@ -45,6 +47,30 @@ FRANKA_USD = str(
 Q_A = np.array([0.012, -0.568, 0.0, -2.811, 0.0, 3.037, 0.741, 0.04, 0.04])
 Q_B = np.array([0.008, 0.047, -0.008, -2.627, 0.001, 2.857, 0.741, 0.04, 0.04])
 Q_C = np.array([0.331, 0.135, 1.171, -2.587, -0.590, 2.743, 0.741, 0.02, 0.02])
+
+# Pick-and-place keyframes (from validated isaac_pick_place.py, J0 rotated
+# by pi/2 to reach +y into the chamber instead of +x).
+# Original targets (relative): above [0.45,0,0.25], grasp [0.45,0,0.08],
+# lift [0.45,0,0.3], place [0,0.45,0.25]. With J0=pi/2, +x becomes +y.
+_PI2 = np.pi / 2
+Q_PP_ABOVE = np.array([_PI2, 0.047, -0.008, -2.627, 0.001, 2.857, 0.741, 0.04, 0.04])
+Q_PP_GRASP = np.array([_PI2, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
+Q_PP_HOLD  = np.array([_PI2, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
+Q_PP_LIFT  = np.array([_PI2, -0.077, -0.007, -2.656, 0.001, 2.903, 0.741, 0.00, 0.00])
+# Place: rotated 0.6 rad to the side for a different target
+Q_PP_PPLACE = np.array([_PI2 + 0.6, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
+Q_PP_RELEASE = np.array([_PI2 + 0.6, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
+
+# Pick-and-place sequence: (keyframes, steps)
+PP_SEQ = [
+    (Q_PP_ABOVE, 60),    # move above tube
+    (Q_PP_GRASP, 40),    # descend to tube
+    (Q_PP_HOLD, 20),     # close gripper
+    (Q_PP_LIFT, 40),     # lift
+    (Q_PP_PPLACE, 80),   # move to place target
+    (Q_PP_RELEASE, 20),  # open gripper
+    (Q_PP_ABOVE, 60),    # retract
+]
 
 
 def smooth(a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
@@ -171,6 +197,12 @@ def main():
     # ---------------- chamber ----------------
     build_chamber(CHAMBER_CX, CHAMBER_CY)
 
+    # Pickup tube: placed at the grasp position (0, 1.55) just inside the
+    # chamber front, where the Q_PP_GRASP keyframe puts the gripper.
+    # (Arm at (0,1.1,0.9), J0=pi/2 → hand at (0, 1.55, 0.98))
+    _box(None, None, None, "/World/Chamber/PickupTube",
+         (0.03, 0.03, 0.11), (0.0, 1.55, BENCH_Z + 0.055), "lightblue")
+
     # ---------------- fixed arm on pedestal ----------------
     # Pedestal top at BENCH_Z so the arm base is level with the chamber floor.
     _box(None, None, None, "/World/Pedestal", (0.5, 0.5, BENCH_Z),
@@ -263,16 +295,35 @@ def main():
     from PIL import Image
     out_dir = Path(args.out)
 
+    # Pick-and-place state
+    pp_phase = [0]  # current phase index
+    pp_step = [0]   # steps within phase
+    pp_tube_held = [False]  # is the tube grasped?
+
     def step_scene(t):
-        # Gentle arm keyframe loop
-        ph = (t * 0.25) % 1.5
-        if ph < 0.5:
-            q = smooth(Q_A, Q_B, ph / 0.5)
-        elif ph < 1.0:
-            q = smooth(Q_B, Q_C, ph - 0.5)
-        else:
-            q = smooth(Q_C, Q_A, ph - 1.0)
+        # Pick-and-place sequence (loops)
+        phase_idx = pp_phase[0]
+        q_target, phase_steps = PP_SEQ[phase_idx]
+        # Smooth towards target
+        q_current = arm.get_joint_positions()
+        alpha = min(1.0, (pp_step[0] + 1) / phase_steps)
+        q = q_current + (q_target - q_current) * 0.15
         arm.set_joint_position_targets(q)
+        pp_step[0] += 1
+        if pp_step[0] >= phase_steps:
+            pp_step[0] = 0
+            pp_phase[0] = (phase_idx + 1) % len(PP_SEQ)
+            # Update tube held state based on phase transitions
+            if phase_idx == 2:  # after HOLD (grasp) phase
+                pp_tube_held[0] = True
+            elif phase_idx == 5:  # after RELEASE phase
+                pp_tube_held[0] = False
+        # Tube follows the hand when held
+        if pp_tube_held[0]:
+            hw = get_hand_world()
+            # Tube hangs 5cm below the hand
+            set_prim_world("/World/Chamber/PickupTube",
+                           (hw[0], hw[1], hw[2] - 0.05))
         # Wrist camera tracks the hand
         aim_wrist()
 
