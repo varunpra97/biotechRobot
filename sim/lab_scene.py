@@ -16,6 +16,8 @@ Usage (Isaac venv, repo root on Windows box):
     python sim\\lab_scene.py                  # GUI, animated
     python sim\\lab_scene.py --headless       # one animated pass, no window
     python sim\\lab_scene.py --capture        # save PNGs from all 15 cameras
+    python sim\\lab_scene.py --camera wrist0  # GUI, viewport starts at wrist0
+    python sim\\lab_scene.py --list-cameras   # print camera names and exit
 """
 from __future__ import annotations
 
@@ -205,6 +207,12 @@ def main():
     ap.add_argument("--capture", action="store_true",
                     help="save PNGs from all cameras and exit")
     ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\lab_captures")
+    ap.add_argument("--camera", default=None,
+                    help="GUI mode: set viewport to this camera on startup. "
+                         "One of: chamber0_cam0, chamber0_cam1, ..., chamber3_cam1, "
+                         "wrist0, wrist1, platform, corner0..corner3")
+    ap.add_argument("--list-cameras", action="store_true",
+                    help="print camera names and exit")
     args = ap.parse_args()
 
     from isaacsim import SimulationApp
@@ -368,6 +376,13 @@ def main():
             Image.fromarray(rgb).save(str(out_dir / f"{tag}_{name}.png"))
         print(f"captured {len(cams)} images [{tag}]")
 
+    if args.list_cameras:
+        print("Available cameras:")
+        for name in sorted(cams.keys()):
+            print(f"  {name}")
+        simulation_app.close()
+        return
+
     if args.capture:
         # Platform is stationary; capture at 3 different arm poses (t=0, 10, 20s)
         for k, tt in enumerate([0.0, 10.0, 20.0]):
@@ -382,6 +397,22 @@ def main():
             simulation_app.update()
         print("HEADLESS RUN OK")
     else:
+        # GUI mode: optionally set viewport to requested camera
+        if args.camera:
+            if args.camera not in cams:
+                print(f"Unknown camera '{args.camera}'. Available:")
+                for n in sorted(cams.keys()):
+                    print(f"  {n}")
+            else:
+                prim_path, _ = cams[args.camera]
+                try:
+                    import omni.kit.viewport.utility as vpu
+                    vp = vpu.get_active_viewport()
+                    vp.set_active_camera(prim_path)
+                    print(f"Viewport set to camera: {args.camera} ({prim_path})")
+                except Exception as e:
+                    print(f"Could not set viewport camera: {e}")
+                    print(f"Tip: in the GUI, use the viewport's camera dropdown and pick {prim_path}")
         t = 0.0
         while simulation_app.is_running():
             step_scene(t)
