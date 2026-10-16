@@ -34,7 +34,7 @@ CHAMBER_W, CHAMBER_D = 3.0, 2.0       # wide x deep
 BENCH_Z = 0.9                          # work surface height
 WORK_H = 1.5                           # work zone height
 CHAMBER_CX, CHAMBER_CY = 0.0, 2.5      # chamber center (front faces -y)
-ARM_POS = (0.0, 0.6, 0.45)             # fixed arm base (0.9m in front)
+ARM_POS = (0.0, 0.6, BENCH_Z)          # fixed arm base, level with work surface
 
 FRANKA_USD = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
@@ -172,8 +172,9 @@ def main():
     build_chamber(CHAMBER_CX, CHAMBER_CY)
 
     # ---------------- fixed arm on pedestal ----------------
-    _box(None, None, None, "/World/Pedestal", (0.5, 0.5, ARM_POS[2]),
-         (ARM_POS[0], ARM_POS[1], ARM_POS[2] / 2), "darkgray")
+    # Pedestal top at BENCH_Z so the arm base is level with the chamber floor.
+    _box(None, None, None, "/World/Pedestal", (0.5, 0.5, BENCH_Z),
+         (ARM_POS[0], ARM_POS[1], BENCH_Z / 2), "darkgray")
     add_reference_to_stage(usd_path=FRANKA_USD, prim_path="/World/Arm")
 
     def set_prim_world(path, pos):
@@ -213,8 +214,8 @@ def main():
     # 1 wrist camera (follows end effector; positioned per-frame below)
     # Initial guess: above the arm
     cams["wrist"] = aim("wrist",
-                        (ARM_POS[0] + 0.5, ARM_POS[1] - 0.5, 1.5),
-                        (ARM_POS[0], ARM_POS[1], 0.8), (640, 480))
+                        (ARM_POS[0] + 0.5, ARM_POS[1] - 0.5, 1.8),
+                        (ARM_POS[0], ARM_POS[1], 1.2), (640, 480))
 
     print(f"scene ready: 1 chamber, 1 arm, {len(cams)} cameras")
 
