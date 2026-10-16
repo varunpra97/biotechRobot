@@ -2,14 +2,15 @@
 
 Room (10m x 6m x 3m) with 4 biosafety-style chambers (2 per side, facing a
 central 2m walkway). Each chamber has a pull-up window (posed open), latch,
-test tube rack (3x4), 2 plungers, and a sample tray. A mobile platform
-carrying 2 Franka arms slides along the walkway.
+test tube rack (3x4), 2 plungers, and a sample tray. A STATIONARY mobile
+platform in front of the north-east chamber carries 2 Franka arms (both on
+the chamber-facing side of the deck) for simultaneous dual-arm work.
 
 Cameras (15 total):
   - 8 chamber cameras (2 per chamber, looking at the work surface)
-  - 2 wrist cameras (static viewpoints overlooking each arm's workspace)
-  - 1 platform camera (on the base, views the arms)
-  - 4 room corner cameras (1280x960, track the mobile base)
+  - 2 wrist cameras (static viewpoints overlooking each arm)
+  - 1 platform camera (static, views both arms on the deck)
+  - 4 room corner cameras (1280x960, watch the mobile base)
 
 Usage (Isaac venv, repo root on Windows box):
     python sim\\lab_scene.py                  # GUI, animated
@@ -228,17 +229,24 @@ def main():
         idx += 1
 
     # ---------------- mobile platform + 2 Franka arms ----------------
+    # Platform STATIONARY in front of north-east chamber (2.5, 2.4).
+    # Chamber front face at y=1.8; platform at y=0.9 gives 0.9m clearance.
+    PLAT_X, PLAT_Y = 2.5, 0.9
     _box(None, None, None, "/World/Platform/Base", (1.4, 0.9, 0.22),
-         (0, 0, 0.28), "darkgray")
+         (PLAT_X, PLAT_Y, 0.28), "darkgray")
     _box(None, None, None, "/World/Platform/Deck", (1.3, 0.8, 0.06),
-         (0, 0, 0.42), "yellow")
+         (PLAT_X, PLAT_Y, 0.42), "yellow")
     for i, wx in enumerate((-0.5, 0.5)):
         for j, wy in enumerate((-0.3, 0.3)):
             _box(None, None, None, f"/World/Platform/Wheel{i}_{j}",
-                 (0.18, 0.1, 0.18), (wx, wy, 0.09), "black")
+                 (0.18, 0.1, 0.18), (PLAT_X + wx, PLAT_Y + wy, 0.09), "black")
 
     arm_paths = ["/World/Arm0", "/World/Arm1"]
-    arm_y = [-0.28, 0.28]
+    # Both arms ON TOP of the platform deck (z=0.45), on the +y side
+    # (facing the chamber at y=2.4) so they can work on it simultaneously.
+    # Deck is 0.8 wide in y (y in [0.5, 1.3] at PLAT_Y=0.9); arms at y=1.05, 1.20.
+    arm_pos = [(PLAT_X - 0.25, PLAT_Y + 0.15, 0.45),
+               (PLAT_X + 0.25, PLAT_Y + 0.15, 0.45)]
     for p in arm_paths:
         add_reference_to_stage(usd_path=FRANKA_USD, prim_path=p)
 
@@ -248,8 +256,8 @@ def main():
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
 
-    for p in arm_paths:
-        set_prim_world(p, (0, 0, 0.45))
+    for p, pos in zip(arm_paths, arm_pos):
+        set_prim_world(p, pos)
 
     # ---------------- cameras (Replicator look_at for orientation + Camera for capture) ----------------
     # Replicator's look_at correctly orients the USD camera prim.
@@ -274,20 +282,21 @@ def main():
             eye = (fx + sx, fy + facing * 0.55, fz + 0.75)
             name = f"chamber{i}_cam{j}"
             cams[name] = aim(name, eye, (fx, fy, fz), (640, 480))
-    # 1 platform camera (front of deck, views arms) — re-aimed per frame
+    # 1 platform camera (static, views both arms on the deck)
     cams["platform"] = aim("platform",
-                           (0.75, 0, 0.75), (0, 0, 0.9), (640, 480))
-    # 4 corner cameras (high-res, watch the mobile base)
+                           (PLAT_X + 1.5, PLAT_Y - 1.2, 1.6),
+                           (PLAT_X, PLAT_Y + 0.15, 0.7), (640, 480))
+    # 4 corner cameras (high-res, watch the mobile base at its fixed spot)
     corners = [(-4.7, -2.7), (4.7, -2.7), (-4.7, 2.7), (4.7, 2.7)]
     for k, (cx_, cy_) in enumerate(corners):
         name = f"corner{k}"
         eye = (cx_, cy_, 2.8)
-        cams[name] = aim(name, eye, (0, 0, 0.5), (1280, 960))
-    # 2 wrist cameras — STATIC viewpoints near the arms
-    # Positioned to overlook each arm's workspace from front-side.
-    for w, wy in enumerate([-0.28, 0.28]):
-        eye = (1.2, wy + 0.9, 1.9)
-        tgt = (0.0, wy, 0.75)
+        cams[name] = aim(name, eye, (PLAT_X, PLAT_Y, 0.5), (1280, 960))
+    # 2 wrist cameras — STATIC viewpoints overlooking each arm
+    # Arms at (2.25, 1.05) and (2.75, 1.05); cameras look down at them.
+    for w, (ax, ay, az) in enumerate(arm_pos):
+        eye = (ax + 0.9, ay - 0.7, 1.7)
+        tgt = (ax, ay, 0.7)
         cams[f"wrist{w}"] = aim(f"wrist{w}", eye, tgt, (640, 480))
 
     # ---------------- start physics + articulations (after cameras) ----------------
@@ -332,21 +341,11 @@ def main():
     n_steps = 0
 
     def step_scene(t):
-        # platform slides x in [-3, 3]
-        px = 3.0 * np.sin(t * 0.15)
-        set_prim_world("/World/Platform/Base", (px, 0, 0.28))
-        set_prim_world("/World/Platform/Deck", (px, 0, 0.42))
-        wi = 0
-        for j in range(2):
-            for k in range(2):
-                wx = (-0.5, 0.5)[j]
-                set_prim_world(f"/World/Platform/Wheel{j}_{k}",
-                               (px + wx, (-0.3, 0.3)[k], 0.09))
-            wi += 1
-        # arms follow platform; gentle keyframe loop (phase-offset)
+        # Platform is STATIONARY (fixed at PLAT_X, PLAT_Y in front of chamber).
+        # Arms stay mounted on the deck; gentle keyframe loop (phase-offset).
         for ai, a in enumerate(arms):
             a.set_world_poses(
-                positions=np.array([px, arm_y[ai], 0.45]),
+                positions=np.array(arm_pos[ai]),
                 orientations=np.array([1.0, 0.0, 0.0, 0.0]))
             ph = (t * 0.25 + ai * 0.5) % 1.5
             if ph < 0.5:
@@ -357,8 +356,7 @@ def main():
                 q = smooth(Q_C, Q_A, ph - 1.0)
             a.set_dof_position_targets(q)
         # platform camera follows platform (update Replicator camera USD transform)
-        if _plat_path:
-            aim_rep_camera(_plat_path, (px + 0.75, 0, 0.75), (px, 0, 0.9))
+        # platform camera is static (platform doesn't move); aimed at arms once at creation
         # wrist cameras are static (see creation above); no per-frame update
 
     def capture(tag):
@@ -371,7 +369,8 @@ def main():
         print(f"captured {len(cams)} images [{tag}]")
 
     if args.capture:
-        for k, tt in enumerate([-10.5, 0.0, 10.5]):
+        # Platform is stationary; capture at 3 different arm poses (t=0, 10, 20s)
+        for k, tt in enumerate([0.0, 10.0, 20.0]):
             step_scene(tt)
             for _ in range(20):
                 simulation_app.update()
