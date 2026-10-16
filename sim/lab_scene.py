@@ -48,18 +48,18 @@ Q_A = np.array([0.012, -0.568, 0.0, -2.811, 0.0, 3.037, 0.741, 0.04, 0.04])
 Q_B = np.array([0.008, 0.047, -0.008, -2.627, 0.001, 2.857, 0.741, 0.04, 0.04])
 Q_C = np.array([0.331, 0.135, 1.171, -2.587, -0.590, 2.743, 0.741, 0.02, 0.02])
 
-# Pick-and-place keyframes (from validated isaac_pick_place.py, J0 rotated
-# by pi/2 to reach +y into the chamber instead of +x).
-# Original targets (relative): above [0.45,0,0.25], grasp [0.45,0,0.08],
-# lift [0.45,0,0.3], place [0,0.45,0.25]. With J0=pi/2, +x becomes +y.
-_PI2 = np.pi / 2
-Q_PP_ABOVE = np.array([_PI2, 0.047, -0.008, -2.627, 0.001, 2.857, 0.741, 0.04, 0.04])
-Q_PP_GRASP = np.array([_PI2, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
-Q_PP_HOLD  = np.array([_PI2, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
-Q_PP_LIFT  = np.array([_PI2, -0.077, -0.007, -2.656, 0.001, 2.903, 0.741, 0.00, 0.00])
-# Place: rotated 0.6 rad to the side for a different target
-Q_PP_PPLACE = np.array([_PI2 + 0.6, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
-Q_PP_RELEASE = np.array([_PI2 + 0.6, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
+# Pick-and-place keyframes (from validated isaac_pick_place.py).
+# The arm BASE is yawed 90° (see below), so local +x points in world +y
+# (into the chamber). Original targets (relative): above [0.45,0,0.25],
+# grasp [0.45,0,0.08], lift [0.45,0,0.3], place [0,0.45,0.25].
+# With the yawed base, grasp puts the hand at (arm_x, arm_y+0.45, arm_z+0.08).
+Q_PP_ABOVE = np.array([0.008, 0.047, -0.008, -2.627, 0.001, 2.857, 0.741, 0.04, 0.04])
+Q_PP_GRASP = np.array([0.010, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
+Q_PP_HOLD  = np.array([0.010, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
+Q_PP_LIFT  = np.array([0.007, -0.077, -0.007, -2.656, 0.001, 2.903, 0.741, 0.00, 0.00])
+# Place: J0 rotated 0.6 rad for a sideways target (validated pattern)
+Q_PP_PPLACE = np.array([0.610, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.00, 0.00])
+Q_PP_RELEASE = np.array([0.610, 0.531, -0.008, -2.421, 0.001, 2.755, 0.741, 0.04, 0.04])
 
 # Pick-and-place sequence: (keyframes, steps)
 PP_SEQ = [
@@ -215,7 +215,17 @@ def main():
         xf.ClearXformOpOrder()
         xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
 
-    set_prim_world("/World/Arm", ARM_POS)
+    def set_prim_pose(path, pos, yaw_deg):
+        # Set position + yaw rotation (for the arm base)
+        prim = stage_utils.get_current_stage().GetPrimAtPath(path)
+        xf = UsdGeom.Xformable(prim)
+        xf.ClearXformOpOrder()
+        xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
+        xf.AddRotateZOp().Set(float(yaw_deg))
+
+    # Arm base yawed 90° so local +x (reach direction) points in world +y
+    # (into the chamber). Validated keyframes then reach correctly.
+    set_prim_pose("/World/Arm", ARM_POS, 90.0)
 
     # ---------------- cameras ----------------
     import omni.replicator.core as rep
