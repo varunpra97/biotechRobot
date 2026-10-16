@@ -28,26 +28,17 @@ Open PowerShell **in that folder** and run:
 powershell -ExecutionPolicy Bypass -File setup_windows.ps1
 ```
 
-This verifies the GPU, creates `.venv`, installs PyTorch (CUDA 12.1),
-MuJoCo, Newton/Warp, and runs validation: CUDA visible → MuJoCo arm sim →
-camera render test.
+This verifies the GPU, creates `.venv`, and installs PyTorch/MuJoCo/Newton
+(currently unused by anything in the repo, but harmless to have on hand).
 
-## 4. Generate training data + train
+## 4. Run the lab scene (Isaac Sim)
+
+The scene and cameras run under Isaac Sim's own `.venv-isaac`, a separate
+environment (not the `.venv` from step 3):
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
-$env:PYTHONPATH = "."
-# keypose-annotated demos (headless OK)
-python sim/make_demos.py --episodes 200 --out data/demos
-# rendered episodes for the perception net (needs GPU)
-python sim/camera_sim.py --episodes 200 --out data/renders
-# train perception: images -> (tray, goal) poses
-python perception/train_pose_net.py --data data/renders
-# train diffusion models
-python policies/train_keypose.py --data data/demos
-python policies/train_traj.py --data data/demos
+..\.venv-isaac\Scripts\Activate.ps1
+python sim\lab_scene.py --capture --out ..\lab_captures
 ```
 
-`train_*.py` are thin training loops to be completed on this box —
-`policies/diffusion.py` (models) and `sim/make_demos.py` (data) are done
-and validated.
+See the main [README](README.md) for the full set of view/capture commands.

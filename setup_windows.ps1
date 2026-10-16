@@ -35,16 +35,10 @@ pip install -r requirements.txt
 pip install newton warp-lang usd-core
 
 Write-Host "`n== [6/6] Validation =="
-# All project scripts do cross-package imports (sim.*, embodiments.*, ...),
-# so the repo root must be on sys.path for direct script runs.
-$env:PYTHONPATH = (Get-Location).Path
 python -c "import torch; assert torch.cuda.is_available(), 'CUDA not visible'; print('CUDA OK:', torch.cuda.get_device_name(0))"
 python -c "import newton, warp; print('Newton OK')"
-python embodiments\arm_generator.py --help | Out-Null
-python -m embodiments.arm_generator --config configs\canonical_arm.yaml --out assets
-python sim\run_arm.py --mjcf assets\canonical_arm_6dof.xml --seconds 2
-python sim\camera_sim.py --episodes 2 --out assets\vision_episodes
 
 Write-Host "`nSetup complete. Next:"
-Write-Host "  - Inspect assets\vision_episodes\ep_0000\ (wrist.png, cam_a.png, cam_b.png, meta.json)"
-Write-Host "  - Train the vision policy (Stage 5) once the lab world is modeled."
+Write-Host "  - Scene setup + cameras run under Isaac Sim's own .venv-isaac, not this venv:"
+Write-Host "      ..\.venv-isaac\Scripts\Activate.ps1"
+Write-Host "      python sim\lab_scene.py --capture --out ..\lab_captures"
