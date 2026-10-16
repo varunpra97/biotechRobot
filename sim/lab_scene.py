@@ -31,8 +31,9 @@ import numpy as np
 # ----------------------------------------------------------------------------
 ROOM_X, ROOM_Y, ROOM_Z = 10.0, 6.0, 3.0      # room size (m)
 WALKWAY_HALF = 1.0                            # walkway |y| < 1
-CHAMBER_W, CHAMBER_D, CHAMBER_H = 2.0, 1.2, 1.8
+CHAMBER_W, CHAMBER_D, CHAMBER_H = 2.6, 1.6, 2.1
 BENCH_Z = 0.9                                 # work surface height
+WORK_H = 1.2                                  # work zone height (BENCH_Z → BENCH_Z+WORK_H)
 CHAMBER_XS = (-2.5, 2.5)                      # chamber centers along x
 CHAMBER_Y = 2.4                               # |y| center (front face at 1.8)
 
@@ -112,9 +113,10 @@ def build_room():
 
 
 def build_chamber(idx, cx, cy, facing):
-    """One chamber: base cabinet, enclosure, open window + latch, props.
+    """One chamber: base cabinet, enclosure (open front, no window), props.
 
     facing = +1 → front faces +y (south chambers); -1 → faces -y (north).
+    Front is fully open (no sash/window) for an unobstructed camera view.
     """
     root = f"/World/Chambers/Ch{idx}"
     fx = cx  # front-center x
@@ -125,32 +127,21 @@ def build_chamber(idx, cx, cy, facing):
     # work surface slab
     _box(None, None, None, f"{root}/Bench", (CHAMBER_W, CHAMBER_D, 0.04),
          (cx, cy, BENCH_Z + 0.02), "white")
-    # back / side / top panels (work zone BENCH_Z → BENCH_Z+0.9)
-    wz = BENCH_Z + 0.45
+    # back / side / top panels (work zone BENCH_Z → BENCH_Z+WORK_H)
+    wz = BENCH_Z + WORK_H / 2
     _box(None, None, None, f"{root}/Back",
-         (CHAMBER_W, 0.05, 0.9), (cx, cy - facing * (CHAMBER_D / 2 - 0.025), wz),
+         (CHAMBER_W, 0.05, WORK_H), (cx, cy - facing * (CHAMBER_D / 2 - 0.025), wz),
          "lightgray")
     _box(None, None, None, f"{root}/SideL",
-         (0.05, CHAMBER_D, 0.9), (cx - CHAMBER_W / 2 + 0.025, cy, wz),
+         (0.05, CHAMBER_D, WORK_H), (cx - CHAMBER_W / 2 + 0.025, cy, wz),
          "lightgray")
     _box(None, None, None, f"{root}/SideR",
-         (0.05, CHAMBER_D, 0.9), (cx + CHAMBER_W / 2 - 0.025, cy, wz),
+         (0.05, CHAMBER_D, WORK_H), (cx + CHAMBER_W / 2 - 0.025, cy, wz),
          "lightgray")
     _box(None, None, None, f"{root}/Top",
-         (CHAMBER_W, CHAMBER_D, 0.05), (cx, cy, BENCH_Z + 0.9), "lightgray")
-    # front sash frame (header above opening)
-    _box(None, None, None, f"{root}/Header",
-         (CHAMBER_W, 0.05, 0.3), (cx, cy + facing * (CHAMBER_D / 2 - 0.025),
-                                  BENCH_Z + 0.75), "gray")
-    # window glass — POSED OPEN (slid up, in front of header)
-    _box(None, None, None, f"{root}/Window",
-         (CHAMBER_W - 0.1, 0.02, 0.55),
-         (cx, cy + facing * (CHAMBER_D / 2 + 0.01), BENCH_Z + 0.62),
-         "lightblue")
-    # latch handle on the window's lower rail
-    _box(None, None, None, f"{root}/Latch",
-         (0.3, 0.04, 0.05),
-         (cx, cy + facing * (CHAMBER_D / 2 + 0.03), BENCH_Z + 0.36), "orange")
+         (CHAMBER_W, CHAMBER_D, 0.05), (cx, cy, BENCH_Z + WORK_H), "lightgray")
+    # Front is FULLY OPEN — no header, no window glass, no latch.
+    # (Removed per user request for unobstructed inside-out camera view.)
 
     # ---- props on the work surface (z = BENCH_Z + 0.04) ----
     pz = BENCH_Z + 0.04
@@ -188,14 +179,14 @@ def build_chamber(idx, cx, cy, facing):
     import isaacsim.core.experimental.utils.stage as _su
     _stage = _su.get_current_stage()
     _light = UsdLux.RectLight.Define(_stage, f"{root}/InteriorLight")
-    _light.GetIntensityAttr().Set(800.0)
-    _light.GetWidthAttr().Set(1.2)
-    _light.GetHeightAttr().Set(0.7)
+    _light.GetIntensityAttr().Set(1000.0)
+    _light.GetWidthAttr().Set(1.8)
+    _light.GetHeightAttr().Set(1.0)
     _lx = UsdGeom.Xformable(_light)
     _lx.ClearXformOpOrder()
     # position under top panel, rotate to point down (-Z -> -Z is default;
     # RectLight shines along -Z, so translate only)
-    _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + 0.82))
+    _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + WORK_H - 0.08))
 
     # return work-surface focus point for cameras
     return (cx, cy, pz + 0.1)
@@ -274,8 +265,10 @@ def main():
     from isaacsim.sensors.camera import Camera
 
     # helper: create a Replicator camera with look_at, return (prim_path, Camera)
-    def aim(name, eye, target, res):
-        rep.create.camera(position=tuple(eye), look_at=tuple(target), name=name)
+    # focal_length: shorter = wider FOV (default 24 ≈ 47°; 14 ≈ 73° wide)
+    def aim(name, eye, target, res, focal_length=24.0):
+        rep.create.camera(position=tuple(eye), look_at=tuple(target), name=name,
+                          focal_length=focal_length)
         # Rep creates /Replicator/{name}_Xform/{name} (Xform containing Camera)
         prim_path = f"/Replicator/{name}_Xform/{name}"
         cam = Camera(prim_path, resolution=res)
@@ -283,22 +276,19 @@ def main():
         return (prim_path, cam)
 
     cams = {}  # name -> (prim_path, Camera)
-    # 8 chamber cameras (2 per chamber): INSIDE the chamber, pointing OUT.
-    # Captures the chamber opening, items on the work surface (foreground),
-    # and the walkway/arms outside. Chamber 1 (2.5, 2.4) has the dual-arm
-    # platform in front, so its cameras see the arms working.
-    # NOTE: kept away from side walls (sx=±0.4, not ±0.7) to avoid the
-    # camera clipping through the wall (black diagonal artifact).
+    # 8 chamber cameras (2 per chamber): INSIDE at the back, pointing OUT.
+    # Wide FOV (focal 14) to capture the full chamber interior, opening,
+    # and arms outside. Chamber 1 has the dual-arm platform in front.
     for i, (fx, fy, fz) in enumerate(chamber_focus):
         facing = -1 if fy > 0 else 1  # north chambers face -y
-        for j, sx in enumerate((-0.4, 0.4)):
-            # Inside: near the back wall, elevated (work zone z 0.9–1.8)
-            eye = (fx + sx, fy - facing * 0.35, fz + 0.55)
-            # Outside: 2m out along the facing direction, tilted slightly
-            # toward center (away from the near side wall)
-            target = (fx + sx * 0.2, fy + facing * 2.0, fz)
+        for j, sx in enumerate((-0.3, 0.3)):
+            # Back of chamber (0.2m from back wall), upper work zone
+            eye = (fx + sx, fy - facing * (CHAMBER_D / 2 - 0.2),
+                   BENCH_Z + WORK_H * 0.7)
+            # Out through the opening, toward the walkway/arms
+            target = (fx, fy + facing * 2.5, BENCH_Z + 0.2)
             name = f"chamber{i}_cam{j}"
-            cams[name] = aim(name, eye, target, (640, 480))
+            cams[name] = aim(name, eye, target, (640, 480), focal_length=14.0)
     # 1 platform camera (static, views both arms on the deck)
     cams["platform"] = aim("platform",
                            (PLAT_X + 1.5, PLAT_Y - 1.2, 1.6),
