@@ -17,6 +17,7 @@ Usage (Isaac venv, repo root on Windows box):
     python sim\\lab_scene.py --headless       # headless sanity check, no window
     python sim\\lab_scene.py --capture        # save PNGs from all 5 cameras, exit
     python sim\\lab_scene.py --camera wrist   # GUI, viewport starts at this camera
+    python sim\\lab_scene.py --multi-view     # GUI, all 5 cameras tiled at once
     python sim\\lab_scene.py --list-cameras   # print camera names and exit
 """
 from __future__ import annotations
@@ -115,6 +116,8 @@ def main():
     ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\lab_captures")
     ap.add_argument("--camera", default=None,
                     help="GUI mode: set viewport to this camera on startup")
+    ap.add_argument("--multi-view", action="store_true",
+                    help="GUI mode: tile all cameras in one window, viewed simultaneously")
     ap.add_argument("--list-cameras", action="store_true",
                     help="print camera names and exit")
     args = ap.parse_args()
@@ -122,7 +125,7 @@ def main():
     from isaacsim import SimulationApp
     simulation_app = SimulationApp({"headless": args.headless or args.capture})
 
-    from pxr import Gf, UsdGeom
+    from pxr import Gf, Sdf, UsdGeom
     import isaacsim.core.experimental.utils.stage as stage_utils
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.core.experimental.objects import DomeLight
@@ -242,7 +245,26 @@ def main():
             simulation_app.update()
         print("HEADLESS RUN OK")
     else:
-        if args.camera:
+        import omni.kit.viewport.utility as vpu
+
+        if args.multi_view:
+            # Tile every camera into its own window, viewed simultaneously.
+            # Grid: 3 columns, tiles sized so 5 fit on a 1440x900+ screen.
+            tile_w, tile_h = 480, 360
+            cols = 3
+            default_win = vpu.get_active_viewport_window()
+            if default_win is not None:
+                default_win.visible = False
+            for idx, (name, (prim_path, _)) in enumerate(sorted(cams.items())):
+                col, row = idx % cols, idx // cols
+                win = vpu.create_viewport_window(
+                    name=name, width=tile_w, height=tile_h,
+                    position_x=col * tile_w, position_y=row * tile_h,
+                    camera_path=Sdf.Path(prim_path),
+                )
+                win.viewport_api.set_active_camera(Sdf.Path(prim_path))
+            print(f"Multi-view: {len(cams)} cameras tiled in a {cols}-column grid")
+        elif args.camera:
             if args.camera not in cams:
                 print(f"Unknown camera '{args.camera}'. Available:")
                 for n in sorted(cams.keys()):
@@ -250,7 +272,6 @@ def main():
             else:
                 prim_path, _ = cams[args.camera]
                 try:
-                    import omni.kit.viewport.utility as vpu
                     vp = vpu.get_active_viewport()
                     vp.set_active_camera(prim_path)
                     print(f"Viewport set to camera: {args.camera}")
