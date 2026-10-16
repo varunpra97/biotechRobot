@@ -287,13 +287,16 @@ def main():
     # Captures the chamber opening, items on the work surface (foreground),
     # and the walkway/arms outside. Chamber 1 (2.5, 2.4) has the dual-arm
     # platform in front, so its cameras see the arms working.
+    # NOTE: kept away from side walls (sx=±0.4, not ±0.7) to avoid the
+    # camera clipping through the wall (black diagonal artifact).
     for i, (fx, fy, fz) in enumerate(chamber_focus):
         facing = -1 if fy > 0 else 1  # north chambers face -y
-        for j, sx in enumerate((-0.7, 0.7)):
+        for j, sx in enumerate((-0.4, 0.4)):
             # Inside: near the back wall, elevated (work zone z 0.9–1.8)
             eye = (fx + sx, fy - facing * 0.35, fz + 0.55)
-            # Outside: 2m out along the facing direction, near work-surface height
-            target = (fx + sx * 0.3, fy + facing * 2.0, fz + 0.1)
+            # Outside: 2m out along the facing direction, tilted slightly
+            # toward center (away from the near side wall)
+            target = (fx + sx * 0.2, fy + facing * 2.0, fz)
             name = f"chamber{i}_cam{j}"
             cams[name] = aim(name, eye, target, (640, 480))
     # 1 platform camera (static, views both arms on the deck)
