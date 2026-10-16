@@ -214,7 +214,6 @@ def main():
     from isaacsim.core.experimental.objects import DomeLight
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.core.experimental.prims import Articulation
-    from isaacsim.sensors.camera import Camera
     from pxr import Gf, UsdGeom
 
     DomeLight("/World/DomeLight").set_intensities(1500)
@@ -252,95 +251,44 @@ def main():
     for p in arm_paths:
         set_prim_world(p, (0, 0, 0.45))
 
-    # ---------------- cameras (BEFORE play: render products need pre-play setup) ----------------
-    # ensure parent prim exists (Camera won't auto-create missing parents)
-    UsdGeom.Xform.Define(stage_utils.get_current_stage(), "/World/Cameras")
+    # ---------------- cameras (Replicator look_at for orientation + Camera for capture) ----------------
+    # Replicator's look_at correctly orients the USD camera prim.
+    # The isaacsim Camera class then captures from that prim (reads USD transform).
+    import omni.replicator.core as rep
+    from isaacsim.sensors.camera import Camera
 
-    # helper: create a Camera and aim it once (static cameras)
-    # Uses USD transform (proven pattern — do NOT pass position/orientation
-    # to Camera(), it conflicts with the USD xform).
-    # helper: create a Camera and aim it once (static cameras)
-    def aim(path, eye, target, res):
-        cam = Camera(path, resolution=res)
-        eye = np.array(eye, dtype=float)
-        target = np.array(target, dtype=float)
-        f = target - eye; f /= np.linalg.norm(f)
-        up = np.array([0.0, 0.0, 1.0])
-        r = np.cross(f, up); r /= np.linalg.norm(r)
-        u = np.cross(r, f)
-        # Camera world matrix: columns [r, u, -f], translation eye.
-        M = Gf.Matrix4d(r[0], u[0], -f[0], eye[0],
-                        r[1], u[1], -f[1], eye[1],
-                        r[2], u[2], -f[2], eye[2],
-                        0, 0, 0, 1)
-        prim = stage_utils.get_current_stage().GetPrimAtPath(path)
-        xf = UsdGeom.Xformable(prim)
-        xf.ClearXformOpOrder()
-        xf.AddTransformOp().Set(M)
+    # helper: create a Replicator camera with look_at, return (prim_path, Camera)
+    def aim(name, eye, target, res):
+        rep.create.camera(position=tuple(eye), look_at=tuple(target), name=name)
+        # Rep creates /Replicator/{name}_Xform/{name} (Xform containing Camera)
+        prim_path = f"/Replicator/{name}_Xform/{name}"
+        cam = Camera(prim_path, resolution=res)
         cam.initialize()
-        return cam
+        return (prim_path, cam)
 
-    cams = {}  # name -> Camera
-    cam_views = {}  # prim_path -> (eye, target) for static cameras
+    cams = {}  # name -> (prim_path, Camera)
     # 8 chamber cameras (2 per chamber): front-top-left / front-top-right
     for i, (fx, fy, fz) in enumerate(chamber_focus):
         facing = -1 if fy > 0 else 1  # north chambers face -y
         for j, sx in enumerate((-0.7, 0.7)):
             eye = (fx + sx, fy + facing * 0.55, fz + 0.75)
             name = f"chamber{i}_cam{j}"
-            ppath = f"/World/Cameras/Ch{i}_{j}"
-            cams[name] = aim(ppath, eye, (fx, fy, fz), (640, 480))
-            cam_views[ppath] = (eye, (fx, fy, fz))
+            cams[name] = aim(name, eye, (fx, fy, fz), (640, 480))
     # 1 platform camera (front of deck, views arms) — re-aimed per frame
-    cams["platform"] = aim("/World/Cameras/Platform",
+    cams["platform"] = aim("platform",
                            (0.75, 0, 0.75), (0, 0, 0.9), (640, 480))
     # 4 corner cameras (high-res, watch the mobile base)
     corners = [(-4.7, -2.7), (4.7, -2.7), (-4.7, 2.7), (4.7, 2.7)]
     for k, (cx_, cy_) in enumerate(corners):
         name = f"corner{k}"
         eye = (cx_, cy_, 2.8)
-        ppath = f"/World/Cameras/Corner{k}"
-        cams[name] = aim(ppath, eye, (0, 0, 0.5), (1280, 960))
-        cam_views[ppath] = (eye, (0, 0, 0.5))
-    # 2 wrist cameras — STATIC viewpoints near the arms (per-frame following
-    # proved unreliable due to Camera transform caching; fixed views instead)
+        cams[name] = aim(name, eye, (0, 0, 0.5), (1280, 960))
+    # 2 wrist cameras — STATIC viewpoints near the arms
     # Positioned to overlook each arm's workspace from front-side.
     for w, wy in enumerate([-0.28, 0.28]):
         eye = (1.2, wy + 0.9, 1.9)
         tgt = (0.0, wy, 0.75)
-        ppath = f"/World/Cameras/Wrist{w}"
-        cams[f"wrist{w}"] = aim(ppath, eye, tgt, (640, 480))
-        cam_views[ppath] = (eye, tgt)
-
-    hand_paths = [
-        p + "/Geometry/link0/link1/link2/link3/link4/link5/link6/link7/hand"
-        for p in arm_paths
-    ]
-
-    def hand_world(hand_path):
-        prim = stage_utils.get_current_stage().GetPrimAtPath(hand_path)
-        m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
-            omni.timeline.get_timeline_interface().get_current_time())
-        return np.array([m[3][0], m[3][1], m[3][2]])
-
-    def aim_existing(path, eye, target):
-        # Per-frame update (wrist/platform cameras that follow moving targets).
-        prim = stage_utils.get_current_stage().GetPrimAtPath(path)
-        xf = UsdGeom.Xformable(prim)
-        eye = np.array(eye, dtype=float)
-        target = np.array(target, dtype=float)
-        f = target - eye; f /= np.linalg.norm(f)
-        up = np.array([0.0, 0.0, 1.0])
-        r = np.cross(f, up); r /= np.linalg.norm(r)
-        u = np.cross(r, f)
-        M = Gf.Matrix4d(r[0], u[0], -f[0], eye[0],
-                        r[1], u[1], -f[1], eye[1],
-                        r[2], u[2], -f[2], eye[2],
-                        0, 0, 0, 1)
-        xf.ClearXformOpOrder()
-        xf.AddTransformOp().Set(M)
-
-    print(f"scene ready: 4 chambers, 2 arms, {len(cams)} cameras")
+        cams[f"wrist{w}"] = aim(f"wrist{w}", eye, tgt, (640, 480))
 
     # ---------------- start physics + articulations (after cameras) ----------------
     import omni.timeline
@@ -354,8 +302,28 @@ def main():
         a.set_dof_positions(Q_A)
         a.set_dof_position_targets(Q_A)
 
-    # NOTE: static cameras were aimed once before play (via aim()); do NOT
-    # re-aim after play — the pre-play transforms are correct.
+    print(f"scene ready: 4 chambers, 2 arms, {len(cams)} cameras")
+
+    # Platform camera Xform path (rep camera name="platform")
+    # The Xform holds the transform; the Camera child is at .../platform
+    _plat_path = "/Replicator/platform_Xform"
+
+    def aim_rep_camera(prim_path, eye, target):
+        # Update a Replicator camera's USD transform (rep reads from USD)
+        prim = stage_utils.get_current_stage().GetPrimAtPath(prim_path)
+        xf = UsdGeom.Xformable(prim)
+        eye = np.array(eye, dtype=float)
+        target = np.array(target, dtype=float)
+        f = target - eye; f /= np.linalg.norm(f)
+        up = np.array([0.0, 0.0, 1.0])
+        r = np.cross(f, up); r /= np.linalg.norm(r)
+        u = np.cross(r, f)
+        M = Gf.Matrix4d(r[0], u[0], -f[0], eye[0],
+                        r[1], u[1], -f[1], eye[1],
+                        r[2], u[2], -f[2], eye[2],
+                        0, 0, 0, 1)
+        xf.ClearXformOpOrder()
+        xf.AddTransformOp().Set(M)
 
     # ---------------- animation / capture ----------------
     from PIL import Image
@@ -388,16 +356,16 @@ def main():
             else:
                 q = smooth(Q_C, Q_A, ph - 1.0)
             a.set_dof_position_targets(q)
-        # platform camera follows platform
-        aim_existing("/World/Cameras/Platform",
-                     (px + 0.75, 0, 0.75), (px, 0, 0.9))
-        # wrist cameras are static now (see creation above); no per-frame update
+        # platform camera follows platform (update Replicator camera USD transform)
+        if _plat_path:
+            aim_rep_camera(_plat_path, (px + 0.75, 0, 0.75), (px, 0, 0.9))
+        # wrist cameras are static (see creation above); no per-frame update
 
     def capture(tag):
         out_dir.mkdir(parents=True, exist_ok=True)
         for _ in range(8):
             simulation_app.update()
-        for name, cam in cams.items():
+        for name, (prim_path, cam) in cams.items():
             rgb = cam.get_current_frame()["rgb"]
             Image.fromarray(rgb).save(str(out_dir / f"{tag}_{name}.png"))
         print(f"captured {len(cams)} images [{tag}]")
