@@ -7,7 +7,7 @@ carrying 2 Franka arms slides along the walkway.
 
 Cameras (15 total):
   - 8 chamber cameras (2 per chamber, looking at the work surface)
-  - 2 wrist cameras (follow each arm's hand)
+  - 2 wrist cameras (static viewpoints overlooking each arm's workspace)
   - 1 platform camera (on the base, views the arms)
   - 4 room corner cameras (1280x960, track the mobile base)
 
@@ -178,6 +178,22 @@ def build_chamber(idx, cx, cy, facing):
             wy = ty - 0.06 + r * 0.12
             _box(None, None, None, f"{root}/Well_{r}_{c_}",
                  (0.05, 0.05, 0.038), (wx, wy, pz + 0.019), "darkblue")
+
+    # interior light: rect light under the top panel, illuminates work surface
+    # (chambers are enclosed; DomeLight alone leaves them dark)
+    from pxr import UsdLux, UsdGeom, Gf
+    import isaacsim.core.experimental.utils.stage as _su
+    _stage = _su.get_current_stage()
+    _light = UsdLux.RectLight.Define(_stage, f"{root}/InteriorLight")
+    _light.GetIntensityAttr().Set(800.0)
+    _light.GetWidthAttr().Set(1.2)
+    _light.GetHeightAttr().Set(0.7)
+    _lx = UsdGeom.Xformable(_light)
+    _lx.ClearXformOpOrder()
+    # position under top panel, rotate to point down (-Z -> -Z is default;
+    # RectLight shines along -Z, so translate only)
+    _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + 0.82))
+
     # return work-surface focus point for cameras
     return (cx, cy, pz + 0.1)
 
@@ -286,11 +302,15 @@ def main():
         ppath = f"/World/Cameras/Corner{k}"
         cams[name] = aim(ppath, eye, (0, 0, 0.5), (1280, 960))
         cam_views[ppath] = (eye, (0, 0, 0.5))
-    # 2 wrist cameras — created without transform, aimed per-frame to follow hands
-    for w in range(2):
-        c = Camera(f"/World/Cameras/Wrist{w}", resolution=(640, 480))
-        c.initialize()
-        cams[f"wrist{w}"] = c
+    # 2 wrist cameras — STATIC viewpoints near the arms (per-frame following
+    # proved unreliable due to Camera transform caching; fixed views instead)
+    # Positioned to overlook each arm's workspace from front-side.
+    for w, wy in enumerate([-0.28, 0.28]):
+        eye = (1.2, wy + 0.9, 1.9)
+        tgt = (0.0, wy, 0.75)
+        ppath = f"/World/Cameras/Wrist{w}"
+        cams[f"wrist{w}"] = aim(ppath, eye, tgt, (640, 480))
+        cam_views[ppath] = (eye, tgt)
 
     hand_paths = [
         p + "/Geometry/link0/link1/link2/link3/link4/link5/link6/link7/hand"
@@ -371,11 +391,7 @@ def main():
         # platform camera follows platform
         aim_existing("/World/Cameras/Platform",
                      (px + 0.75, 0, 0.75), (px, 0, 0.9))
-        # wrist cameras follow hands (per-frame); static cameras were aimed once
-        for w, hp in enumerate(hand_paths):
-            hw = hand_world(hp)
-            eye = hw + np.array([0.12, 0.0, 0.18])
-            aim_existing(f"/World/Cameras/Wrist{w}", eye, hw)
+        # wrist cameras are static now (see creation above); no per-frame update
 
     def capture(tag):
         out_dir.mkdir(parents=True, exist_ok=True)
