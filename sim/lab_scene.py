@@ -590,6 +590,26 @@ def build_platform(cx, cy, rigid_objects=()):
     return objects
 
 
+def tile_camera_views(cams, tile_w=480, tile_h=360, cols=3):
+    """GUI: show every camera at once, one viewport window each, tiled in a
+    grid (6 cameras at 480x360 in 3 columns fit a 1440x900 screen)."""
+    import omni.kit.viewport.utility as vpu
+    from pxr import Sdf
+
+    default_win = vpu.get_active_viewport_window()
+    if default_win is not None:
+        default_win.visible = False
+    for idx, (name, (prim_path, _)) in enumerate(sorted(cams.items())):
+        col, row = idx % cols, idx // cols
+        win = vpu.create_viewport_window(
+            name=name, width=tile_w, height=tile_h,
+            position_x=col * tile_w, position_y=row * tile_h,
+            camera_path=Sdf.Path(prim_path),
+        )
+        win.viewport_api.set_active_camera(Sdf.Path(prim_path))
+    print(f"Multi-view: {len(cams)} cameras tiled in a {cols}-column grid")
+
+
 def define_physics_scene(path="/PhysicsScene", steps_per_second=60, gpu=True):
     """Author the physics scene explicitly (instead of letting omni.physx
     auto-create one at play) -- same solver settings as the auto-created
@@ -809,22 +829,7 @@ def main():
         import omni.kit.viewport.utility as vpu
 
         if args.multi_view:
-            # Tile every camera into its own window, viewed simultaneously.
-            # Grid: 3 columns, tiles sized so 5 fit on a 1440x900+ screen.
-            tile_w, tile_h = 480, 360
-            cols = 3
-            default_win = vpu.get_active_viewport_window()
-            if default_win is not None:
-                default_win.visible = False
-            for idx, (name, (prim_path, _)) in enumerate(sorted(cams.items())):
-                col, row = idx % cols, idx // cols
-                win = vpu.create_viewport_window(
-                    name=name, width=tile_w, height=tile_h,
-                    position_x=col * tile_w, position_y=row * tile_h,
-                    camera_path=Sdf.Path(prim_path),
-                )
-                win.viewport_api.set_active_camera(Sdf.Path(prim_path))
-            print(f"Multi-view: {len(cams)} cameras tiled in a {cols}-column grid")
+            tile_camera_views(cams)
         elif args.camera:
             if args.camera not in cams:
                 print(f"Unknown camera '{args.camera}'. Available:")

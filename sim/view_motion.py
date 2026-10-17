@@ -19,6 +19,7 @@ interpolating the keyframe joint positions.
 Usage (Isaac venv, repo root on Windows box):
     python sim\\view_motion.py                        # GUI, loops forever
     python sim\\view_motion.py --camera wrist          # start on this camera
+    python sim\\view_motion.py --multi-view            # all cameras tiled at once
     python sim\\view_motion.py --traj <path\\to\\trajectory.npz>
     python sim\\view_motion.py --headless --once       # sanity check, no window
 """
@@ -49,6 +50,8 @@ def main():
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--camera", default=None,
                     help="GUI mode: set viewport to this camera on startup")
+    ap.add_argument("--multi-view", action="store_true",
+                    help="GUI mode: show every camera at once, tiled")
     ap.add_argument("--substeps", type=int, default=3,
                     help="app updates per dense-path step (playback speed)")
     ap.add_argument("--steps-per-waypoint", type=int, default=30,
@@ -75,7 +78,9 @@ def main():
         simulation_app, rigid_objects=(source,) if source else ())
     print(f"scene ready: {len(cams)} cameras")
 
-    if args.camera and not args.headless:
+    if args.multi_view and not args.headless:
+        lab_scene.tile_camera_views(cams)
+    elif args.camera and not args.headless:
         if args.camera not in cams:
             print(f"Unknown camera '{args.camera}'. Available: {sorted(cams.keys())}")
         else:
