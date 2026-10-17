@@ -34,7 +34,12 @@ ROOM_X, ROOM_Y, ROOM_Z = 10.0, 6.0, 3.0
 PLATFORM_W, PLATFORM_D = 1.4, 0.7      # open platform footprint
 BENCH_Z = 0.9                          # platform / pedestal top height
 PLATFORM_CX, PLATFORM_CY = 0.0, 1.8    # platform center
-ARM_POS = (0.0, 0.9, BENCH_Z)          # fixed arm base, facing the platform
+# Fixed arm base, facing the platform. Y chosen so the rack (the farthest
+# task objects, ~0.2-0.6m into the platform from its near edge) fall within
+# the Franka's ~0.85m kinematic reach -- verified via sim/ik_solver.py: at
+# the previous ARM_POS y=0.9, the nearest rack tube was ~1.05m from the
+# hand's home position and IK could not converge on it at all.
+ARM_POS = (0.0, 1.1, BENCH_Z)
 
 FRANKA_USD = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
@@ -43,6 +48,25 @@ FRANKA_USD = str(
 
 # Franka home pose (7 arm joints + 2 fingers) -- the arm is static, held here.
 Q_HOME = np.array([0.012, -0.568, 0.0, -2.811, 0.0, 3.037, 0.741, 0.04, 0.04])
+
+HAND_PATH = "/World/Arm/Geometry/link0/link1/link2/link3/link4/link5/link6/link7/hand"
+
+
+def get_prim_world_pose(path):
+    """World pose [x,y,z, qw,qx,qy,qz] of a prim, or None if it doesn't exist."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Gf, UsdGeom
+    import omni.timeline
+
+    prim = stage_utils.get_current_stage().GetPrimAtPath(path)
+    if not prim.IsValid():
+        return None
+    m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
+        omni.timeline.get_timeline_interface().get_current_time())
+    tf = Gf.Transform(m)
+    t = tf.GetTranslation()
+    q = tf.GetRotation().GetQuat()
+    return np.array([t[0], t[1], t[2], q.GetReal(), *q.GetImaginary()])
 
 
 # ----------------------------------------------------------------------------
@@ -61,33 +85,49 @@ def _box(path, size, pos, color=None):
 
 
 def build_platform(cx, cy):
-    """Open test-tube platform: support stand, bench top, props, work light."""
+    """Open test-tube platform: support stand, bench top, props, work light.
+
+    Returns {name: {"path": prim_path, "size": (w, d, h)}} for the loggable
+    task objects (tubes, pipettes, tray) -- not the static fixtures (stand,
+    bench, rack body, light). "size" is the object's authored full bounding
+    box (the dimensions it was built with), used for state-aware metadata
+    and for computing task-space targets relative to an object (e.g. its
+    top opening) without re-deriving geometry by hand at call sites.
+    """
     root = "/World/Platform"
     _box(f"{root}/Stand", (PLATFORM_W, PLATFORM_D, BENCH_Z),
          (cx, cy, BENCH_Z / 2), "gray")
     _box(f"{root}/Bench", (PLATFORM_W, PLATFORM_D, 0.04),
          (cx, cy, BENCH_Z + 0.02), "white")
 
+    objects = {}
     pz = BENCH_Z + 0.04
     # test tube rack (3x4)
     rx, ry = cx - 0.4, cy
+    tube_size = (0.03, 0.03, 0.11)
     _box(f"{root}/Rack", (0.36, 0.26, 0.05), (rx, ry, pz + 0.025), "darkgray")
     for r in range(3):
         for c_ in range(4):
             tx = rx - 0.12 + c_ * 0.08
             ty = ry - 0.08 + r * 0.08
-            _box(f"{root}/Tube_{r}_{c_}", (0.03, 0.03, 0.11),
-                 (tx, ty, pz + 0.05 + 0.055), "lightblue")
+            path = f"{root}/Tube_{r}_{c_}"
+            _box(path, tube_size, (tx, ty, pz + 0.05 + 0.055), "lightblue")
+            objects[f"tube_{r}_{c_}"] = {"path": path, "size": tube_size}
     # 2 pipettes
+    pipette_size = (0.22, 0.025, 0.025)
     for i, off in enumerate((-0.15, 0.15)):
         px, py = cx, cy + off
-        _box(f"{root}/Pipette{i}_body", (0.22, 0.025, 0.025),
-             (px, py, pz + 0.02), "white")
+        body_path = f"{root}/Pipette{i}_body"
+        _box(body_path, pipette_size, (px, py, pz + 0.02), "white")
         _box(f"{root}/Pipette{i}_tip", (0.06, 0.012, 0.012),
              (px + 0.14, py, pz + 0.015), "gray")
+        objects[f"pipette_{i}"] = {"path": body_path, "size": pipette_size}
     # sample tray with wells
+    tray_size = (0.34, 0.24, 0.035)
     tx, ty = cx + 0.4, cy
-    _box(f"{root}/Tray", (0.34, 0.24, 0.035), (tx, ty, pz + 0.017), "blue")
+    tray_path = f"{root}/Tray"
+    _box(tray_path, tray_size, (tx, ty, pz + 0.017), "blue")
+    objects["tray"] = {"path": tray_path, "size": tray_size}
     for r in range(2):
         for c_ in range(4):
             wx = tx - 0.12 + c_ * 0.08
@@ -107,25 +147,18 @@ def build_platform(cx, cy):
     _lx.ClearXformOpOrder()
     _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + 1.3))
 
+    return objects
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--headless", action="store_true")
-    ap.add_argument("--capture", action="store_true",
-                    help="save PNGs from all cameras and exit")
-    ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\lab_captures")
-    ap.add_argument("--camera", default=None,
-                    help="GUI mode: set viewport to this camera on startup")
-    ap.add_argument("--multi-view", action="store_true",
-                    help="GUI mode: tile all cameras in one window, viewed simultaneously")
-    ap.add_argument("--list-cameras", action="store_true",
-                    help="print camera names and exit")
-    args = ap.parse_args()
 
-    from isaacsim import SimulationApp
-    simulation_app = SimulationApp({"headless": args.headless or args.capture})
+def build_scene(simulation_app):
+    """Build room + platform + arm + cameras; settle the arm into its home
+    pose. Returns (arm: Articulation, cams: {name: (prim_path, Camera)},
+    objects: {name: {"path": prim_path, "size": (w, d, h)}}).
 
-    from pxr import Gf, Sdf, UsdGeom
+    Shared by lab_scene.py's own CLI (viewing/capture) and sim/collect_data.py
+    (data generation), so both always build the exact same scene.
+    """
+    from pxr import Gf, UsdGeom
     import isaacsim.core.experimental.utils.stage as stage_utils
     from isaacsim.core.utils.stage import add_reference_to_stage
     from isaacsim.core.experimental.objects import DomeLight
@@ -140,7 +173,7 @@ def main():
     DomeLight("/World/DomeLight").set_intensities(1500)
 
     # ---------------- platform ----------------
-    build_platform(PLATFORM_CX, PLATFORM_CY)
+    objects = build_platform(PLATFORM_CX, PLATFORM_CY)
 
     # ---------------- fixed arm on pedestal ----------------
     # Pedestal top at BENCH_Z so the arm base is level with the platform.
@@ -184,16 +217,6 @@ def main():
     for _ in range(10):
         simulation_app.update()
 
-    hand_path = "/World/Arm/Geometry/link0/link1/link2/link3/link4/link5/link6/link7/hand"
-
-    def get_hand_world():
-        prim = stage_utils.get_current_stage().GetPrimAtPath(hand_path)
-        if not prim.IsValid():
-            return np.array(ARM_POS)
-        m = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(
-            omni.timeline.get_timeline_interface().get_current_time())
-        return np.array([m[3][0], m[3][1], m[3][2]])
-
     cams = {}
     # 2 behind the robot arm: arm + tube platform both in view
     for j, sx in enumerate((-1.3, 1.3)):
@@ -210,11 +233,35 @@ def main():
     # the platform (looking back at the hand itself would clip into the arm's
     # own body). The arm never moves, so this is computed once from its
     # settled home-pose transform.
-    hw = get_hand_world()
+    hw = get_prim_world_pose(HAND_PATH)
+    hw = hw[:3] if hw is not None else np.array(ARM_POS)
     wrist_eye = hw + np.array([0.0, 0.0, 1.0])
     wrist_target = (PLATFORM_CX, PLATFORM_CY, BENCH_Z + 0.1)
     cams["wrist"] = aim("wrist", tuple(wrist_eye), wrist_target, (640, 480))
 
+    return arm, cams, objects
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--headless", action="store_true")
+    ap.add_argument("--capture", action="store_true",
+                    help="save PNGs from all cameras and exit")
+    ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\lab_captures")
+    ap.add_argument("--camera", default=None,
+                    help="GUI mode: set viewport to this camera on startup")
+    ap.add_argument("--multi-view", action="store_true",
+                    help="GUI mode: tile all cameras in one window, viewed simultaneously")
+    ap.add_argument("--list-cameras", action="store_true",
+                    help="print camera names and exit")
+    args = ap.parse_args()
+
+    from isaacsim import SimulationApp
+    simulation_app = SimulationApp({"headless": args.headless or args.capture})
+
+    from pxr import Sdf
+
+    arm, cams, objects = build_scene(simulation_app)
     print(f"scene ready: 1 platform, 1 arm (static), {len(cams)} cameras")
 
     out_dir = Path(args.out)
