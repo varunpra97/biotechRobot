@@ -1,11 +1,16 @@
 """Biotech lab setup: open test-tube platform + Franka arm on a pedestal.
 
 Room (10m x 6m x 3m), no enclosure. One open platform (1.4m x 0.7m, bench
-height) holds a 3x4 test tube rack, a sample tray with wells, and 2
-pipettes. One fixed Franka arm sits on a pedestal facing the platform,
-base height matched to the platform so it can reach everything on it. The
-arm is static -- held in its home pose, no motion -- this script only
-builds and lets you view/capture the scene.
+height) holds a 5x4 test tube holder with 20 tubes, a 96-well plate, 2
+pipettes and a centrifuge (lid off, fixed-angle rotor with six 8mm bores).
+One fixed-base Franka arm sits on a pedestal facing the platform, base
+height matched to it. Run directly, this script builds the scene with the
+arm held at its home pose to view/capture it; the collect_data*.py scripts
+build the same scene via build_scene() and move the arm.
+
+Physics: 240 Hz (PHYSICS_HZ), static fixtures collide as their exact
+triangle meshes, tubes as low-poly convex hulls -- see those constants and
+load_mesh_prim for why each matters for 7mm tubes in 8mm bores.
 
 Cameras (6 total):
   - 2 behind the robot arm (arm + tube platform both in view)
@@ -19,9 +24,9 @@ Cameras (6 total):
 Usage (Isaac venv, repo root on Windows box):
     python sim\\lab_scene.py                  # GUI, static scene
     python sim\\lab_scene.py --headless       # headless sanity check, no window
-    python sim\\lab_scene.py --capture        # save PNGs from all 5 cameras, exit
+    python sim\\lab_scene.py --capture        # save PNGs from all 6 cameras, exit
     python sim\\lab_scene.py --camera wrist   # GUI, viewport starts at this camera
-    python sim\\lab_scene.py --multi-view     # GUI, all 5 cameras tiled at once
+    python sim\\lab_scene.py --multi-view     # GUI, all 6 cameras tiled at once
     python sim\\lab_scene.py --list-cameras   # print camera names and exit
 """
 from __future__ import annotations
@@ -73,47 +78,90 @@ def get_prim_world_pose(path):
     return np.array([t[0], t[1], t[2], q.GetReal(), *q.GetImaginary()])
 
 
-def set_prim_world_position(path, world_pos):
-    """Set a prim's world position via a direct translate, keeping it at
-    identity orientation (position-only kinematic update -- used for the
-    "tube rides with the gripper" attach during pick-and-place; the tube
-    has no authored rotation to begin with, so this doesn't lose anything,
-    and a tube staying upright while carried is a reasonable look)."""
+def quat_to_matrix(q):
+    """[qw, qx, qy, qz] -> 3x3 rotation matrix."""
+    qw, qx, qy, qz = q
+    return np.array([
+        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+    ])
+
+
+def matrix_to_quat(R):
+    """3x3 rotation matrix -> [qw, qx, qy, qz] (qw >= 0)."""
+    tr = np.trace(R)
+    if tr > 0:
+        s = 2.0 * np.sqrt(tr + 1.0)
+        q = [0.25 * s, (R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s, (R[1, 0] - R[0, 1]) / s]
+    elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2])
+        q = [(R[2, 1] - R[1, 2]) / s, 0.25 * s, (R[0, 1] + R[1, 0]) / s, (R[0, 2] + R[2, 0]) / s]
+    elif R[1, 1] > R[2, 2]:
+        s = 2.0 * np.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2])
+        q = [(R[0, 2] - R[2, 0]) / s, (R[0, 1] + R[1, 0]) / s, 0.25 * s, (R[1, 2] + R[2, 1]) / s]
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1])
+        q = [(R[1, 0] - R[0, 1]) / s, (R[0, 2] + R[2, 0]) / s, (R[1, 2] + R[2, 1]) / s, 0.25 * s]
+    q = np.array(q) / np.linalg.norm(q)
+    return q if q[0] >= 0 else -q
+
+
+def set_prim_world_pose(path, pos, quat=(1.0, 0.0, 0.0, 0.0)):
+    """Set a parentless-in-practice prim's full pose (translate + orient,
+    double precision). Full pose, not position only: a grasped object has
+    to rotate with the hand -- e.g. a tube tilted 45 deg to go into a
+    fixed-angle rotor bore -- or it visibly stops lining up with the
+    fingers. Reuses existing translate/orient ops when present so PhysX's
+    own pose write-back for a rigid body keeps using the same ops."""
     import isaacsim.core.experimental.utils.stage as stage_utils
     from pxr import Gf, UsdGeom
 
     prim = stage_utils.get_current_stage().GetPrimAtPath(path)
     xf = UsdGeom.Xformable(prim)
-    xf.ClearXformOpOrder()
-    xf.AddTranslateOp().Set(Gf.Vec3d(float(world_pos[0]), float(world_pos[1]), float(world_pos[2])))
+    ops = xf.GetOrderedXformOps()
+    if [op.GetOpType() for op in ops] != [UsdGeom.XformOp.TypeTranslate,
+                                          UsdGeom.XformOp.TypeOrient]:
+        xf.ClearXformOpOrder()
+        ops = [xf.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble),
+               xf.AddOrientOp(UsdGeom.XformOp.PrecisionDouble)]
+    t_op, o_op = ops
+    t_op.Set(Gf.Vec3d(*(float(v) for v in pos)))
+    w, x, y, z = (float(v) for v in quat)
+    if o_op.GetPrecision() == UsdGeom.XformOp.PrecisionDouble:
+        o_op.Set(Gf.Quatd(w, Gf.Vec3d(x, y, z)))
+    else:
+        o_op.Set(Gf.Quatf(w, Gf.Vec3f(x, y, z)))
 
 
 LEFT_FINGER_PATH = HAND_PATH + "/left_finger"
 RIGHT_FINGER_PATH = HAND_PATH + "/right_finger"
-# Measured (sim/dev notes): the finger pad's lowest point sits ~0.045m below
-# the left_finger/right_finger body origin (verified by traversing the pad's
-# collision boxes and taking their lowest world Z at the home pose). Padded
-# slightly (measured ~0.04m) so this stays conservative -- err on the side
-# of stopping short of a surface, not through it.
-FINGER_PAD_DEPTH = 0.045
+
+# Tool center point (fingertip) in the hand's local frame: on the gripper's
+# center line, at the finger pads' lowest point. Measured from the real
+# asset, not estimated (cad_source/probe_franka_kinematics.py and
+# probe_gripper_colliders.py): the fingers open along hand-local +/-Y (the
+# finger joint value is each pad's distance from the center line), the
+# approach axis is hand-local +Z, and both the visual finger meshes and
+# their PhysX convex-hull colliders end at z = 0.1123. The previous
+# estimate (finger origin + 0.045 straight down in WORLD z) was 8.9mm short
+# of the real tip, and wrong in direction whenever the hand isn't vertical.
+TCP_LOCAL = np.array([0.0, 0.0, 0.1123])
+# Finger pad contact face spans hand-local z 0.0945..0.1123.
+FINGER_PAD_LENGTH = 0.0178
+
+
+def get_tcp_pose():
+    """(position, rotation matrix) of the TCP in world -- rotation is the
+    hand's (z = approach axis, y = finger closing axis)."""
+    h = get_prim_world_pose(HAND_PATH)
+    R = quat_to_matrix(h[3:7])
+    return h[:3] + R @ TCP_LOCAL, R
 
 
 def get_fingertip_pos():
-    """World position of the gripper's control point: the midpoint between
-    the two finger bodies, offset down by FINGER_PAD_DEPTH to approximate
-    the actual pad tips (not the finger mount frames). This is what IK
-    targets should be defined against for any task that touches/approaches
-    an object -- the hand frame origin is ~8cm above the real contact
-    point, and targeting it directly drives the fingers through whatever
-    the hand is "above" (this was the root cause of a real, visually
-    confirmed interpenetration bug in the first version of this task)."""
-    lf = get_prim_world_pose(LEFT_FINGER_PATH)
-    rf = get_prim_world_pose(RIGHT_FINGER_PATH)
-    if lf is None or rf is None:
-        return None
-    mid = (lf[:3] + rf[:3]) / 2.0
-    mid[2] -= FINGER_PAD_DEPTH
-    return mid
+    """World position of the TCP (see TCP_LOCAL)."""
+    return get_tcp_pose()[0]
 
 
 MM_TO_M = 0.001
@@ -122,18 +170,32 @@ CAD_DIR = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
     / "biotech-lab-robotics" / "assets" / "cad"
 )
-TUBE_HOLDER_OBJ = f"{CAD_DIR}/tube_holder.obj"      # 5x4 bore rack, 25.98mm holes
+TUBE_HOLDER_OBJ = f"{CAD_DIR}/tube_holder.obj"      # 5x4 rack, 8.0mm blind bores
 SAMPLE_TRAY_OBJ = f"{CAD_DIR}/sample_tray.obj"      # real 96-well plate (SBS standard)
 PIPETTE_OBJ = f"{CAD_DIR}/pipette.obj"
 CENTRIFUGE_OBJ = f"{CAD_DIR}/centrifuge.obj"
-TEST_TUBE_OBJ = f"{CAD_DIR}/test_tube.obj"          # procedural hollow tube, 11mm OD (see cad_source/make_test_tube.py)
+TEST_TUBE_OBJ = f"{CAD_DIR}/test_tube.obj"          # 7mm OD x 58mm, conical tip; local z=0 at the tip
+TEST_TUBE_COLLISION_OBJ = f"{CAD_DIR}/test_tube_collision.obj"  # 40-vertex convex hull
 
-# Measured directly from the holder mesh (cad_source/rack -- circle-fit on
-# cross-sections, not guessed from its misleading GrabCAD title): 20 bores
-# in a clean 5x4 grid, local to the holder's own mesh origin.
-HOLDER_HOLE_X_MM = [-123.0, -61.5, 0.0, 61.5, 123.0]
-HOLDER_HOLE_Y_MM = [-92.3, -30.8, 30.7, 92.2]
+# Holder design values (cad_source/make_tray_20holes.py, parametric CAD --
+# exact, not measured): 5x4 grid at 61.5mm pitch centered on the holder's
+# mesh origin, 8.0mm bores 28mm deep, so each bore's floor is 12mm above
+# the holder's base. Tubes stand on that floor (they previously floated
+# 30mm above it at a guessed insertion depth).
+HOLDER_PITCH_MM = 61.5
+HOLDER_HOLE_X_MM = [(i - 2) * HOLDER_PITCH_MM for i in range(5)]
+HOLDER_HOLE_Y_MM = [(j - 1.5) * HOLDER_PITCH_MM for j in range(4)]
 HOLDER_THICKNESS_MM = 40.0
+HOLDER_BORE_FLOOR_MM = 12.0
+
+# Physics rate. 240 Hz, not the 60 Hz default: at 60 Hz a released 7mm tube
+# moves 1.4-2.7mm per step under gravity alone -- more than its 0.5mm bore
+# clearance and more than half the rotor sleeve's 0.8mm wall -- so contacts
+# flip to the far side of the wall and the tube is pushed out through it.
+# At 240 Hz (and 480) it seats and stays (cad_source/probe_release_variants.py).
+PHYSICS_HZ = 240
+
+TUBE_MASS_KG = 0.0015   # 580.6 mm^3 of borosilicate glass (2.23 g/cm^3) ~1.3 g, + residue
 
 # Rigid-body physics materials, per material-type friction/restitution
 # guidance (glass/polypropylene labware: low restitution, friction
@@ -164,172 +226,246 @@ def _get_physics_material(name):
 # ----------------------------------------------------------------------------
 # Scene construction
 # ----------------------------------------------------------------------------
-def load_mesh_prim(prim_path, obj_path, pos, yaw_deg=0.0, pitch_deg=0.0,
-                    roll_deg=0.0, color=None, collision=True, material="plastic"):
-    """Load a triangle mesh from an OBJ file as a USD mesh prim, with
-    PhysX convex-decomposition collision and a bound rigid-body physics
-    material (friction/restitution) -- real CAD-derived geometry instead
-    of a box/cylinder approximation."""
-    import trimesh
+def _define_mesh(stage, path, mesh, color=None):
     from pxr import Gf, UsdGeom
-    import isaacsim.core.experimental.utils.stage as stage_utils
+
+    um = UsdGeom.Mesh.Define(stage, path)
+    um.CreatePointsAttr([Gf.Vec3f(*v) for v in mesh.vertices])
+    um.CreateFaceVertexCountsAttr([3] * len(mesh.faces))
+    um.CreateFaceVertexIndicesAttr(mesh.faces.flatten().tolist())
+    if color:
+        um.CreateDisplayColorAttr([Gf.Vec3f(*color)])
+    return um
+
+
+def _apply_collider(stage, path, approximation, material):
     from isaacsim.core.experimental.prims import GeomPrim
     from pxr import UsdPhysics
 
+    geom = GeomPrim(paths=path, apply_collision_apis=True)
+    UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(path))         .GetApproximationAttr().Set(approximation)
+    geom.apply_physics_materials(_get_physics_material(material))
+
+
+def load_mesh_prim(prim_path, obj_path, pos, yaw_deg=0.0, pitch_deg=0.0,
+                    roll_deg=0.0, color=None, collision=True, material="plastic",
+                    approximation="convexDecomposition", collision_obj=None):
+    """Load a triangle mesh from an OBJ file as a USD prim with a PhysX
+    collider and a bound rigid-body physics material (friction/restitution)
+    -- real CAD-derived geometry instead of a box/cylinder approximation.
+
+    approximation: PhysX collider for the mesh --
+      "none": the exact triangle mesh. Static fixtures only (PhysX can't
+          simulate a dynamic triangle mesh), but it's the only option that
+          keeps narrow bores (8mm holder/rotor bores) exactly as modeled;
+          a convex decomposition approximates and can partially fill them.
+      "convexHull": exact for a convex shape -- if it has <= 64 vertices.
+          PhysX caps hulls at 64 (GPU pipeline) and EXPANDS a reduced hull
+          to contain every input point, so a finely tessellated visual
+          mesh gets an inflated collider. Pass a low-poly collision_obj.
+      "convexDecomposition": general concave fallback.
+
+    collision_obj: separate collision mesh. prim_path then becomes an
+    Xform (the one to make a rigid body / move) holding a rendered
+    "visual" mesh with no collider and an invisible ("guide" purpose)
+    "collision" mesh.
+
+    Pose is authored as translate + orient (double), the op layout
+    set_prim_world_pose() and PhysX's rigid-body write-back both use.
+    Returns (prim_path, visual mesh extents)."""
+    import trimesh
+    from pxr import UsdGeom
+    import isaacsim.core.experimental.utils.stage as stage_utils
+
     mesh = trimesh.load(obj_path, force="mesh")
     stage = stage_utils.get_current_stage()
-    usd_mesh = UsdGeom.Mesh.Define(stage, prim_path)
-    usd_mesh.CreatePointsAttr([Gf.Vec3f(*v) for v in mesh.vertices])
-    usd_mesh.CreateFaceVertexCountsAttr([3] * len(mesh.faces))
-    usd_mesh.CreateFaceVertexIndicesAttr(mesh.faces.flatten().tolist())
-    if color:
-        usd_mesh.CreateDisplayColorAttr([Gf.Vec3f(*color)])
+    if collision_obj is None:
+        _define_mesh(stage, prim_path, mesh, color)
+        collider_path = prim_path
+    else:
+        UsdGeom.Xform.Define(stage, prim_path)
+        _define_mesh(stage, f"{prim_path}/visual", mesh, color)
+        cm = _define_mesh(stage, f"{prim_path}/collision",
+                          trimesh.load(collision_obj, force="mesh"))
+        UsdGeom.Imageable(cm).CreatePurposeAttr(UsdGeom.Tokens.guide)
+        collider_path = f"{prim_path}/collision"
 
-    xf = UsdGeom.Xformable(usd_mesh)
-    xf.ClearXformOpOrder()
-    xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
-    if roll_deg:
-        xf.AddRotateXOp().Set(float(roll_deg))
-    if pitch_deg:
-        xf.AddRotateYOp().Set(float(pitch_deg))
-    if yaw_deg:
-        xf.AddRotateZOp().Set(float(yaw_deg))
+    def _rot(axis, deg):
+        c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
+        return {"x": np.array([[1, 0, 0], [0, c, -s], [0, s, c]]),
+                "y": np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]]),
+                "z": np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]])}[axis]
+
+    R = _rot("x", roll_deg) @ _rot("y", pitch_deg) @ _rot("z", yaw_deg)
+    set_prim_world_pose(prim_path, pos, matrix_to_quat(R))
 
     if collision:
-        geom = GeomPrim(paths=prim_path, apply_collision_apis=True)
-        UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(prim_path)) \
-            .GetApproximationAttr().Set("convexDecomposition")
-        geom.apply_physics_materials(_get_physics_material(material))
-
+        _apply_collider(stage, collider_path, approximation, material)
     return prim_path, tuple(float(v) for v in mesh.extents)
 
 
-def load_centrifuge_open(prim_path_prefix, obj_path, pos, roll_deg=90.0,
-                          hinge_angle_deg=35.0, include_lid=False,
-                          color_body=None, color_lid=None, collision=True,
-                          material="metal"):
-    """Load the centrifuge mesh split into (body+rotor) and (lid), with the
-    lid rotated open about a hinge pivot at its own bottom-back edge --
-    it stays attached/touching the body there and swings up and back,
-    instead of being translated away into a detached-looking floating
-    piece (the first version of this did that; visibly wrong, fixed here).
-    Not a real hinge joint/articulation yet, just a static open pose --
-    per-user, fine for now, a real hinge is future work once this needs
-    to actually animate.
+def collider_paths(path):
+    """Every collider prim at or under path."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Usd, UsdPhysics
 
-    The mesh is a single fused STEP/STL export, but trimesh.split() finds
-    26 separate connected components inside it. Which ones are the lid
-    (prim index 23, plus two small lid-top details at 0/1) vs. the body
-    and its internal rotor was confirmed visually, not guessed -- see
-    cad_source/test_centrifuge_parts.py, a color-coded isolated render.
-    These indices are specific to this exact mesh export.
-    """
-    import math
-    import numpy as np
+    root = stage_utils.get_current_stage().GetPrimAtPath(path)
+    return [str(p.GetPath()) for p in Usd.PrimRange(root, Usd.TraverseInstanceProxies())
+            if p.HasAPI(UsdPhysics.CollisionAPI)]
+
+
+def make_rigid_body(path, mass_kg, kinematic=True, contact_offset=0.001):
+    """Turn a prim (and the colliders under it) into a PhysX rigid body
+    with a real mass. Starts kinematic (pose driven by set_prim_world_pose,
+    e.g. while held rigidly by the gripper); set_kinematic(path, False)
+    hands it to the physics solver (e.g. on release, so it settles under
+    gravity and contact). Small contact offset, zero rest offset: a ~1.5 g,
+    7mm tube working with ~0.5mm clearances, where the default
+    (scene-scale) contact offset would be far coarser than the fit."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import PhysxSchema, UsdPhysics
+
+    stage = stage_utils.get_current_stage()
+    prim = stage.GetPrimAtPath(path)
+    UsdPhysics.RigidBodyAPI.Apply(prim).CreateKinematicEnabledAttr(bool(kinematic))
+    UsdPhysics.MassAPI.Apply(prim).CreateMassAttr(float(mass_kg))
+    prb = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+    prb.CreateSolverPositionIterationCountAttr(16)
+    # Never sleep: a sleeping body reports no contacts, and the task checks
+    # a released object's resting contact (penetration depth) via the
+    # contact report.
+    prb.CreateSleepThresholdAttr(0.0)
+    PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr(0.0)
+    for cp in collider_paths(path):
+        pc = PhysxSchema.PhysxCollisionAPI.Apply(stage.GetPrimAtPath(cp))
+        pc.CreateContactOffsetAttr(float(contact_offset))
+        pc.CreateRestOffsetAttr(0.0)
+
+
+def contacts_of(body_path):
+    """PhysX's contact report for the last simulation step, for one rigid
+    body (which needs PhysxContactReportAPI -- make_rigid_body applies it):
+    {other collider path: {"min_separation": m, "impulse": N*s, "n": count}}.
+    Negative separation is penetration depth -- the meaningful check for a
+    body RESTING on something, where an overlap query always reports a hit."""
+    from omni.physx import get_physx_simulation_interface
+    from pxr import PhysicsSchemaTools
+
+    headers, data = get_physx_simulation_interface().get_contact_report()
+    out = {}
+    for h in headers:
+        a0 = str(PhysicsSchemaTools.intToSdfPath(h.actor0))
+        a1 = str(PhysicsSchemaTools.intToSdfPath(h.actor1))
+        if body_path not in (a0, a1):
+            continue
+        other = str(PhysicsSchemaTools.intToSdfPath(h.collider1 if a0 == body_path else h.collider0))
+        pts = data[h.contact_data_offset:h.contact_data_offset + h.num_contact_data]
+        e = out.setdefault(other, {"min_separation": float("inf"), "impulse": 0.0, "n": 0})
+        for c in pts:
+            e["min_separation"] = min(e["min_separation"], float(c.separation))
+            e["impulse"] += float(np.linalg.norm([c.impulse.x, c.impulse.y, c.impulse.z]))
+            e["n"] += 1
+    return out
+
+
+def set_collision_filter(path, other_paths):
+    """Disable collisions between the body at path and the given bodies
+    (empty list re-enables them all). Used while an object is rigidly held:
+    it moves as one with the hand, so pad-object contact would only be the
+    solver fighting a kinematic object it can't move."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Sdf, UsdPhysics
+
+    prim = stage_utils.get_current_stage().GetPrimAtPath(path)
+    rel = UsdPhysics.FilteredPairsAPI.Apply(prim).CreateFilteredPairsRel()
+    rel.SetTargets([Sdf.Path(p) for p in other_paths])
+
+
+def set_kinematic(path, kinematic):
+    """Switch a rigid body between kinematic (pose-driven) and dynamic,
+    zeroing its velocity so it doesn't inherit motion from the switch.
+    CCD follows the mode: PhysX rejects CCD on kinematic bodies, and a
+    small fast dynamic one needs it so it can't step through thin walls."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Gf, PhysxSchema, UsdPhysics
+
+    prim = stage_utils.get_current_stage().GetPrimAtPath(path)
+    rb = UsdPhysics.RigidBodyAPI(prim)
+    PhysxSchema.PhysxRigidBodyAPI(prim).CreateEnableCCDAttr().Set(not kinematic)
+    rb.GetKinematicEnabledAttr().Set(bool(kinematic))
+    rb.CreateVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    rb.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+
+# The centrifuge mesh is one fused STEP/STL export, but trimesh.split() finds
+# 26 connected components in it. Which are the lid (index 23, plus two small
+# lid-top details at 0/1), the rotor hub (4) and the six fixed-angle rotor
+# sleeves was confirmed from the geometry, not guessed: lid/body by a
+# color-coded isolated render (cad_source/test_centrifuge_parts.py); hub and
+# sleeves by fitting each part's axis -- the sleeves are hollow 8.0mm-ID
+# bores with conical floors, tilted 44.9 deg from vertical, tops leaning in
+# toward the hub (cad_source/raycast_rotor_bore.py). Indices are specific to
+# this exact mesh export.
+CENTRIFUGE_LID_PARTS = {23, 0, 1}
+CENTRIFUGE_HUB_PART = 4
+CENTRIFUGE_SLEEVE_PARTS = (5, 8, 11, 14, 17, 20)
+CENTRIFUGE_ROLL_DEG = 90.0  # the export lies on its side; this stands it up
+
+
+def centrifuge_parts_local(obj_path=None, roll_deg=CENTRIFUGE_ROLL_DEG):
+    """The centrifuge's connected components as trimesh parts in the prim's
+    local frame: rolled upright and leveled so its lowest point is z=0.
+    World coordinates are these + centrifuge_pos(). One definition shared
+    by the scene loader and the rotor-bore geometry used for task targets,
+    so targets are computed from exactly what the simulator loads."""
+    import trimesh
+
+    mesh = trimesh.load(obj_path or CENTRIFUGE_OBJ, force="mesh")
+    parts = mesh.split(only_watertight=False)
+    rx = np.radians(roll_deg)
+    Rx = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)],
+                   [0, np.sin(rx), np.cos(rx)]])
+    z_off = -(mesh.vertices @ Rx.T)[:, 2].min()
+    out = []
+    for p in parts:
+        v = p.vertices @ Rx.T
+        v[:, 2] += z_off
+        out.append(trimesh.Trimesh(v, p.faces, process=False))
+    return out
+
+
+def load_centrifuge(prim_path, pos, color=None, material="metal"):
+    """Load the centrifuge body (housing + rotor hub + six rotor sleeves),
+    lid omitted -- several static "open lid" poses read as visually wrong
+    in review, so it's open by simply having no lid; a real hinged lid
+    would need to be an articulation anyway.
+
+    Collision is the exact triangle mesh ("none"), not a convex
+    decomposition: the body is static, and the rotor's 8mm bores must stay
+    exactly as modeled for a tube to slide into them -- an automatic
+    convex decomposition approximates (and can fill) bores that narrow.
+    Degenerate parts (a few 1-2 vertex slivers in the export) are dropped."""
     import trimesh
     from pxr import Gf, UsdGeom, UsdPhysics
     import isaacsim.core.experimental.utils.stage as stage_utils
     from isaacsim.core.experimental.prims import GeomPrim
 
-    mesh = trimesh.load(obj_path, force="mesh")
-    parts = mesh.split(only_watertight=False)
+    parts = centrifuge_parts_local()
+    body = trimesh.util.concatenate([p for i, p in enumerate(parts)
+                                     if i not in CENTRIFUGE_LID_PARTS and len(p.faces) > 4])
+    stage = stage_utils.get_current_stage()
+    um = UsdGeom.Mesh.Define(stage, prim_path)
+    um.CreatePointsAttr([Gf.Vec3f(*v) for v in body.vertices])
+    um.CreateFaceVertexCountsAttr([3] * len(body.faces))
+    um.CreateFaceVertexIndicesAttr(body.faces.flatten().tolist())
+    if color:
+        um.CreateDisplayColorAttr([Gf.Vec3f(*color)])
+    set_prim_world_pose(prim_path, pos)
 
-    LID_IDXS = {23, 0, 1}
-    rx = math.radians(roll_deg)
-    Rx = np.array([[1, 0, 0], [0, math.cos(rx), -math.sin(rx)],
-                   [0, math.sin(rx), math.cos(rx)]])
-
-    all_rot = mesh.vertices @ Rx.T
-    z_off = -all_rot[:, 2].min()  # shared, so body and lid stay aligned
-
-    # Hinge pivot: the lid's own bottom-back edge (its min-Z, max-Y point,
-    # in the rolled+leveled frame) -- the edge that touches the body's rim
-    # when the lid is closed, so rotating about it keeps that edge in
-    # contact while the rest of the lid swings up and open. This is a
-    # bounding-box-corner approximation, not the true contact seam, so a
-    # visible gap can remain after rotation (confirmed by the user against
-    # a render -- not caught by the bounding-box-only check used during
-    # development); the snap-to-contact step below corrects for that
-    # regardless of how accurate this pivot guess was.
-    lid_sub = [p for i, p in enumerate(parts) if i in LID_IDXS]
-    lid_rot = trimesh.util.concatenate(lid_sub).vertices @ Rx.T
-    lid_rot[:, 2] += z_off
-    pivot = np.array([
-        (lid_rot[:, 0].min() + lid_rot[:, 0].max()) / 2,
-        lid_rot[:, 1].max(),
-        lid_rot[:, 2].min(),
-    ])
-    theta = math.radians(hinge_angle_deg)
-
-    body_sub = [p for i, p in enumerate(parts) if i not in LID_IDXS]
-    body_verts_leveled = trimesh.util.concatenate(body_sub).vertices @ Rx.T
-    body_verts_leveled[:, 2] += z_off
-    # Rotation about a pivot-centered axis parallel to world X (Rodrigues'
-    # formula specialized to axis=(1,0,0)): x unchanged, y/z rotate.
-    def _hinge_rotate(v):
-        d = v - pivot
-        # The dome top sits at negative-dy/positive-dz relative to this
-        # back-bottom pivot; this sign combination is what swings it
-        # UP and back (verified against the first version, which had the
-        # signs flipped and rotated the lid DOWN through the bench instead
-        # -- caught by checking its world bounding box, not just a render).
-        dy = d[:, 1] * math.cos(theta) + d[:, 2] * math.sin(theta)
-        dz = d[:, 2] * math.cos(theta) - d[:, 1] * math.sin(theta)
-        return np.stack([d[:, 0], dy, dz], axis=1) + pivot
-
-    def _snap_to_contact(lid_verts, body_verts, gap_target=0.001):
-        """Translate lid_verts as a rigid body so its single nearest point
-        to body_verts ends up gap_target away (~touching), closing
-        whatever gap the (approximate) hinge pivot left open. Brute-force
-        pairwise distance -- lid/body vertex counts here (hundreds to a
-        few thousand) make that fine, no need for a KD-tree."""
-        d = np.linalg.norm(lid_verts[:, None, :] - body_verts[None, :, :], axis=2)
-        i, j = np.unravel_index(np.argmin(d), d.shape)
-        closest_gap = body_verts[j] - lid_verts[i]
-        dist = np.linalg.norm(closest_gap)
-        if dist <= gap_target:
-            return lid_verts
-        shift = closest_gap * (1.0 - gap_target / dist)
-        return lid_verts + shift
-
-    def _build(idx_set, suffix, is_lid, color):
-        sub = [p for i, p in enumerate(parts) if i in idx_set]
-        combined = trimesh.util.concatenate(sub)
-        verts = combined.vertices @ Rx.T
-        verts[:, 2] += z_off
-        if is_lid:
-            verts = _hinge_rotate(verts)
-            verts = _snap_to_contact(verts, body_verts_leveled)
-
-        path = f"{prim_path_prefix}{suffix}"
-        stage = stage_utils.get_current_stage()
-        um = UsdGeom.Mesh.Define(stage, path)
-        um.CreatePointsAttr([Gf.Vec3f(*v) for v in verts])
-        um.CreateFaceVertexCountsAttr([3] * len(combined.faces))
-        um.CreateFaceVertexIndicesAttr(combined.faces.flatten().tolist())
-        if color:
-            um.CreateDisplayColorAttr([Gf.Vec3f(*color)])
-        xf = UsdGeom.Xformable(um)
-        xf.ClearXformOpOrder()
-        xf.AddTranslateOp().Set(Gf.Vec3d(*pos))
-
-        if collision:
-            geom = GeomPrim(paths=path, apply_collision_apis=True)
-            UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(path)) \
-                .GetApproximationAttr().Set("convexDecomposition")
-            geom.apply_physics_materials(_get_physics_material(material))
-        return path
-
-    body_idxs = set(range(len(parts))) - LID_IDXS
-    body_path = _build(body_idxs, "Body", False, color_body)
-    # Several attempts at a static "open lid resting against the body" pose
-    # (translate-aside, then hinge-rotate, then snap-to-contact + a
-    # shallower angle) still read as visually off per user review -- lid
-    # dropped entirely for now rather than keep iterating on a cosmetic
-    # detail. The body alone already shows the rotor (nothing was ever
-    # covering it), which is what "open" mainly needs to convey.
-    lid_path = _build(LID_IDXS, "Lid", True, color_lid) if include_lid else None
-    return body_path, lid_path
+    geom = GeomPrim(paths=prim_path, apply_collision_apis=True)
+    UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(prim_path))         .GetApproximationAttr().Set("none")
+    geom.apply_physics_materials(_get_physics_material(material))
+    return prim_path
 
 
 def _box(path, size, pos, color=None, collision=True):
@@ -352,10 +488,29 @@ def _box(path, size, pos, color=None, collision=True):
     return cube
 
 
-def build_platform(cx, cy):
+CENTRIFUGE_EXTENTS = (0.143, 0.197, 0.189)  # upright, after the 90 deg roll
+
+
+def holder_xy(cx=PLATFORM_CX, cy=PLATFORM_CY):
+    """Tube holder origin (world XY). Left-of-center and toward the near
+    (arm-facing) edge so the nearest rows are within the arm's reach."""
+    return cx - 0.05, cy - 0.15
+
+
+def centrifuge_pos(cx=PLATFORM_CX, cy=PLATFORM_CY):
+    """Centrifuge mesh origin (world): left of the holder's edge
+    (holder_x - 0.158) with an 8cm gap, standing on the bench top."""
+    hx, hy = holder_xy(cx, cy)
+    return (hx - 0.158 - 0.08 - CENTRIFUGE_EXTENTS[0] / 2, hy, BENCH_Z + 0.04)
+
+
+def build_platform(cx, cy, rigid_objects=()):
     """Open test-tube platform: support stand, bench top, real CAD-derived
     props (tube holder + 20 test tubes, 96-well plate, 2 pipettes), work
     light.
+
+    rigid_objects: names of tubes to make (kinematic) rigid bodies, e.g.
+    the one a task will pick up -- everything else stays a static collider.
 
     Returns {name: {"path": prim_path, "size": (w, d, h)}} for the loggable
     task objects (tubes, pipettes, tray) -- not the static fixtures (stand,
@@ -374,24 +529,26 @@ def build_platform(cx, cy):
     pz = BENCH_Z + 0.04  # bench top surface (world Z); everything sits on this
 
     # ---- tube holder (real 5x4-bore rack) + 20 real hollow test tubes ----
-    # Placed left-of-center and toward the near (arm-facing) edge so at
-    # least the nearest rows are within the arm's ~0.85m reach.
-    holder_x, holder_y = cx - 0.05, cy - 0.15
+    holder_x, holder_y = holder_xy(cx, cy)
     holder_path = f"{root}/TubeHolder"
     load_mesh_prim(holder_path, TUBE_HOLDER_OBJ, (holder_x, holder_y, pz),
-                   color=(0.85, 0.85, 0.85), material="plastic")
+                   color=(0.85, 0.85, 0.85), material="plastic", approximation="none")
 
-    holder_top_z = pz + HOLDER_THICKNESS_MM * MM_TO_M
-    tube_insertion = 0.01  # m, how far the tube's base sits below the holder's top
+    # Each tube stands on its bore's floor (tube local z=0 is its tip).
+    tube_z = pz + HOLDER_BORE_FLOOR_MM * MM_TO_M
     for r, y_mm in enumerate(HOLDER_HOLE_Y_MM):
         for c, x_mm in enumerate(HOLDER_HOLE_X_MM):
             tx = holder_x + x_mm * MM_TO_M
             ty = holder_y + y_mm * MM_TO_M
-            tz = holder_top_z - tube_insertion
+            name = f"tube_r{r}_c{c}"
             path = f"{root}/Tube_r{r}_c{c}"
-            _, tube_extents = load_mesh_prim(path, TEST_TUBE_OBJ, (tx, ty, tz),
-                           color=(0.75, 0.9, 0.95), material="glass")
-            objects[f"tube_r{r}_c{c}"] = {"path": path, "size": tube_extents}
+            _, tube_extents = load_mesh_prim(path, TEST_TUBE_OBJ, (tx, ty, tube_z),
+                                             color=(0.75, 0.9, 0.95), material="glass",
+                                             approximation="convexHull",
+                                             collision_obj=TEST_TUBE_COLLISION_OBJ)
+            if name in rigid_objects:
+                make_rigid_body(path, TUBE_MASS_KG, kinematic=True)
+            objects[name] = {"path": path, "size": tube_extents}
 
     # ---- 2 pipettes (real model, lying flat) ----
     # Mesh origin isn't at its base (local Z spans -0.041 to +0.015), so
@@ -413,17 +570,10 @@ def build_platform(cx, cy):
                    color=(0.6, 0.6, 0.9), material="plastic")
     objects["tray"] = {"path": tray_path, "size": tray_extents}
 
-    # ---- centrifuge, to the LEFT of the test tube holder, upright. ----
-    # ---- Body only (no lid prim) -- see load_centrifuge_open's docstring ----
-    # Upright extents after the roll are (0.143, 0.197, 0.189) -- placed
-    # clear of the holder's left edge (holder_x - 0.158) with a gap.
-    cf_extents = (0.143, 0.197, 0.189)
-    cf_x = holder_x - 0.158 - 0.08 - cf_extents[0] / 2
-    cf_y = holder_y
-    centrifuge_body, _ = load_centrifuge_open(
-        f"{root}/Centrifuge", CENTRIFUGE_OBJ, (cf_x, cf_y, pz),
-        color_body=(0.95, 0.95, 0.95))
-    objects["centrifuge_body"] = {"path": centrifuge_body, "size": cf_extents}
+    # ---- centrifuge, to the LEFT of the test tube holder, upright, no lid ----
+    centrifuge_body = load_centrifuge(f"{root}/CentrifugeBody", centrifuge_pos(cx, cy),
+                                      color=(0.95, 0.95, 0.95))
+    objects["centrifuge_body"] = {"path": centrifuge_body, "size": CENTRIFUGE_EXTENTS}
 
     # overhead work light
     from pxr import UsdLux, UsdGeom, Gf
@@ -440,10 +590,42 @@ def build_platform(cx, cy):
     return objects
 
 
-def build_scene(simulation_app):
+def define_physics_scene(path="/PhysicsScene", steps_per_second=60, gpu=True):
+    """Author the physics scene explicitly (instead of letting omni.physx
+    auto-create one at play) -- same solver settings as the auto-created
+    default (TGS, GPU dynamics/broadphase, 60 Hz), plus one that matters
+    for anything switched from kinematic to dynamic mid-simulation:
+
+    reportKinematicStaticPairs. By default PhysX discards kinematic-vs-
+    static pairs in the broadphase. A tube carried kinematically into the
+    rotor bore (or resting kinematically in the holder) has its pairs
+    with those static meshes discarded while their bounds overlap, and
+    switching it to dynamic does NOT re-create them -- the overlap never
+    "begins" again -- so on release it fell straight through the bore
+    walls and floor (cad_source/probe_pickplace_physics.py). Keeping the
+    pairs makes contact work from the moment it turns dynamic."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Gf, PhysxSchema, UsdPhysics
+
+    stage = stage_utils.get_current_stage()
+    scene = UsdPhysics.Scene.Define(stage, path)
+    scene.CreateGravityDirectionAttr(Gf.Vec3f(0.0, 0.0, -1.0))
+    scene.CreateGravityMagnitudeAttr(9.81)
+    px = PhysxSchema.PhysxSceneAPI.Apply(scene.GetPrim())
+    px.CreateSolverTypeAttr("TGS")
+    px.CreateEnableGPUDynamicsAttr(bool(gpu))
+    px.CreateBroadphaseTypeAttr("GPU" if gpu else "MBP")
+    px.CreateTimeStepsPerSecondAttr(int(steps_per_second))
+    px.CreateReportKinematicStaticPairsAttr(True)
+    px.CreateEnableCCDAttr(True)
+    return path
+
+
+def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=PHYSICS_HZ):
     """Build room + platform + arm + cameras; settle the arm into its home
     pose. Returns (arm: Articulation, cams: {name: (prim_path, Camera)},
     objects: {name: {"path": prim_path, "size": (w, d, h)}}).
+    rigid_objects: see build_platform.
 
     Shared by lab_scene.py's own CLI (viewing/capture) and sim/collect_data.py
     (data generation), so both always build the exact same scene.
@@ -454,6 +636,8 @@ def build_scene(simulation_app):
     from isaacsim.core.experimental.objects import DomeLight
     from isaacsim.core.prims import Articulation
 
+    define_physics_scene(steps_per_second=physics_hz, gpu=gpu_physics)
+
     # ---------------- room ----------------
     _box("/World/Floor", (ROOM_X, ROOM_Y, 0.1), (0, 0, -0.05), "lightgray")
     _box("/World/WallN", (ROOM_X, 0.1, ROOM_Z), (0, ROOM_Y / 2, ROOM_Z / 2), "white")
@@ -463,7 +647,7 @@ def build_scene(simulation_app):
     DomeLight("/World/DomeLight").set_intensities(1500)
 
     # ---------------- platform ----------------
-    objects = build_platform(PLATFORM_CX, PLATFORM_CY)
+    objects = build_platform(PLATFORM_CX, PLATFORM_CY, rigid_objects)
 
     # ---------------- fixed arm on pedestal ----------------
     # Pedestal top at BENCH_Z so the arm base is level with the platform.
@@ -494,8 +678,7 @@ def build_scene(simulation_app):
         cam.initialize()
         return (prim_path, cam)
 
-    # ---------------- physics: settle the arm into its home pose first, so ----
-    # ---------------- the wrist camera can be aimed from its real hand pose --
+    # ---------------- physics: start, settle the arm into its home pose ------
     import omni.timeline
     omni.timeline.get_timeline_interface().play()
     for _ in range(5):
