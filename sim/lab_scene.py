@@ -385,14 +385,22 @@ def set_kinematic(path, kinematic):
     """Switch a rigid body between kinematic (pose-driven) and dynamic,
     zeroing its velocity so it doesn't inherit motion from the switch.
     CCD follows the mode: PhysX rejects CCD on kinematic bodies, and a
-    small fast dynamic one needs it so it can't step through thin walls."""
+    small fast dynamic one needs it so it can't step through thin walls.
+    Order matters -- CCD is only ever on while the body is dynamic, else
+    PhysX logs "kinematic bodies with CCD enabled are not supported" and
+    drops the CCD flag."""
     import isaacsim.core.experimental.utils.stage as stage_utils
     from pxr import Gf, PhysxSchema, UsdPhysics
 
     prim = stage_utils.get_current_stage().GetPrimAtPath(path)
     rb = UsdPhysics.RigidBodyAPI(prim)
-    PhysxSchema.PhysxRigidBodyAPI(prim).CreateEnableCCDAttr().Set(not kinematic)
-    rb.GetKinematicEnabledAttr().Set(bool(kinematic))
+    ccd = PhysxSchema.PhysxRigidBodyAPI(prim).CreateEnableCCDAttr()
+    if kinematic:
+        ccd.Set(False)
+        rb.GetKinematicEnabledAttr().Set(True)
+    else:
+        rb.GetKinematicEnabledAttr().Set(False)
+        ccd.Set(True)
     rb.CreateVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
     rb.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
 
