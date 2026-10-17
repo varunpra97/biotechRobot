@@ -7,18 +7,36 @@ for a sequence of task-space waypoints defined relative to a target
 object's own (programmatically read) world pose, with phase-specific
 motion constraints:
 
-  Approach:    hover above the target tube's opening
-  Execution:   straight-line Cartesian descent into the opening
-  Retraction:  straight-line Cartesian vertical lift back out, before any
+  Approach:    hover above the target tube's top
+  Execution:   straight-line Cartesian descent to just above the tube's
+               top surface -- NOT into it. The tubes are solid boxes, not
+               hollow containers, so "inserting into" one is not something
+               that can be physically correct with this geometry; the
+               physically honest version of this task is approaching and
+               coming to rest just above the surface, as if aligning a
+               pipette tip at the opening without penetrating it.
+  Retraction:  straight-line Cartesian vertical lift back up, before any
                lateral motion (here the lift is purely vertical since
-               approach/dip share the same XY; a lateral retreat to a
-               different object would reuse this same "lift first"
+               approach/execution share the same XY; a lateral retreat to
+               a different object would reuse this same "lift first"
                waypoint before moving sideways)
 
-An episode is only saved if every waypoint's IK actually converged, stayed
-within the arm's joint limits, and kept the hand above the bench surface;
-otherwise it is discarded and the reason is reported -- never silently
-written as if it had succeeded.
+Targets are defined for the gripper's actual fingertip control point
+(lab_scene.get_fingertip_pos()), not the hand frame origin. The hand frame
+sits ~8cm above the real fingertip (measured empirically -- see
+lab_scene.FINGER_PAD_DEPTH); targeting the hand frame directly drove the
+real fingers through whatever the hand was "above", which is what produced
+a visually confirmed interpenetration bug in the first version of this
+script. Scene objects also now have real collision geometry (previously
+none at all -- lab_scene._box()), and the rack's tube spacing was widened
+so the gripper can approach one tube without touching its neighbors.
+
+An episode is only saved if every waypoint's IK converged, stayed within
+the arm's joint limits, kept the hand above the bench surface, AND the
+fingertip (with a gripper-width safety margin) doesn't geometrically
+overlap any scene object's bounding box -- a real collision check, not
+just a height proxy. Otherwise the episode is discarded and the reason is
+reported, never silently written as if it had succeeded.
 
 State-aware metadata (joint names, joint limits, link names, and each task
 object's bounding-box size) is extracted programmatically from the live
@@ -38,25 +56,44 @@ import numpy as np
 import ik_solver
 import lab_scene
 
-TARGET_OBJECT = "tube_1_1"  # a tube roughly in the middle of the 3x4 rack
-HOVER_HEIGHT = 0.12         # m above the tube opening -- approach/retraction
-DIP_HEIGHT = 0.02           # m above the tube opening -- execution target
+TARGET_OBJECT = "tube_r0_c2"  # nearest row (toward the arm), center column
+HOVER_HEIGHT = 0.12         # m above the tube's top -- approach/retraction
+DIP_CLEARANCE = 0.015       # m above the tube's top -- execution target (never below it)
 BENCH_CLEARANCE = 0.01      # m: minimum allowed hand height above the bench
+GRIPPER_RADIUS = 0.045      # m: horizontal safety margin for collision checks,
+                            # approximating the open gripper's footprint
 
 
 def build_waypoints(tube_pos, tube_size):
     """Approach -> straight-line execution descent -> vertical-first
-    retraction, as 5 task-space (x, y, z) targets."""
-    opening_z = tube_pos[2] + tube_size[2] / 2.0
-    hover = np.array([tube_pos[0], tube_pos[1], opening_z + HOVER_HEIGHT])
-    dip = np.array([tube_pos[0], tube_pos[1], opening_z + DIP_HEIGHT])
+    retraction, as 5 task-space (x, y, z) targets for the fingertip."""
+    # tube_pos is the tube's BASE (mesh local origin), not its center --
+    # see collect_data_pickplace.py for why this must be a full tube_size[2].
+    tube_top = tube_pos[2] + tube_size[2]
+    hover = np.array([tube_pos[0], tube_pos[1], tube_top + HOVER_HEIGHT])
+    touch = np.array([tube_pos[0], tube_pos[1], tube_top + DIP_CLEARANCE])
     return [
         ("approach", hover),
-        ("execution_mid", hover + (dip - hover) * 0.5),
-        ("execution_end", dip),
-        ("retraction_mid", dip + (hover - dip) * 0.5),
+        ("execution_mid", hover + (touch - hover) * 0.5),
+        ("execution_end", touch),
+        ("retraction_mid", touch + (hover - touch) * 0.5),
         ("retraction_end", hover),
     ]
+
+
+def check_collision(fingertip_pos, objects, radius=GRIPPER_RADIUS):
+    """Objects whose bounding box (expanded horizontally by `radius`, to
+    approximate the gripper's footprint, but NOT vertically -- vertical
+    precision is exactly what's being validated) contains fingertip_pos."""
+    hits = []
+    for name, info in objects.items():
+        pos = lab_scene.get_prim_world_pose(info["path"])[:3]
+        w, d, h = info["size"]
+        lo = pos - np.array([w / 2 + radius, d / 2 + radius, h / 2])
+        hi = pos + np.array([w / 2 + radius, d / 2 + radius, h / 2])
+        if np.all(fingertip_pos >= lo) and np.all(fingertip_pos <= hi):
+            hits.append(name)
+    return hits
 
 
 def main():
@@ -86,8 +123,8 @@ def main():
     joint_limits = np.asarray(arm.get_dof_limits())[0]  # (9, 2)
     bench_top_z = lab_scene.BENCH_Z + 0.04
 
-    def get_hand_pos():
-        return lab_scene.get_prim_world_pose(lab_scene.HAND_PATH)[:3]
+    def get_fingertip_pos():
+        return lab_scene.get_fingertip_pos()
 
     def step():
         simulation_app.update()
@@ -111,26 +148,31 @@ def main():
         ok = True
         for phase_name, target in waypoints:
             q, converged, iters, err = ik_solver.solve_ik(
-                arm, hand_idx, target, q, joint_limits, get_hand_pos, step)
-            hand_pos = get_hand_pos()
-            above_bench = bool(hand_pos[2] >= (bench_top_z - BENCH_CLEARANCE))
+                arm, hand_idx, target, q, joint_limits, get_fingertip_pos, step)
+            fingertip_pos = get_fingertip_pos()
+            above_bench = bool(fingertip_pos[2] >= (bench_top_z - BENCH_CLEARANCE))
             within_limits = bool(
                 np.all(q[:7] >= joint_limits[:7, 0] - 1e-6)
                 and np.all(q[:7] <= joint_limits[:7, 1] + 1e-6))
             finite = bool(np.all(np.isfinite(q)))
-            wp_ok = converged and above_bench and within_limits and finite
+            collisions = check_collision(fingertip_pos, objects)
+            no_collision = len(collisions) == 0
+            wp_ok = converged and above_bench and within_limits and finite and no_collision
             ok = ok and wp_ok
             wp_log.append({
                 "phase": phase_name, "target": target.tolist(),
                 "ik_converged": converged, "ik_iters": iters,
                 "ik_final_error_m": err, "above_bench": above_bench,
-                "within_joint_limits": within_limits, "ok": wp_ok,
+                "within_joint_limits": within_limits,
+                "no_collision": no_collision, "collisions": collisions,
+                "ok": wp_ok,
             })
             frames_q.append(q.copy())
             if not wp_ok:
                 print(f"  episode {ep}: waypoint '{phase_name}' failed "
                       f"(converged={converged} err={err:.4f} "
-                      f"above_bench={above_bench} within_limits={within_limits})")
+                      f"above_bench={above_bench} within_limits={within_limits} "
+                      f"collisions={collisions})")
                 break
 
         if not ok:
@@ -143,7 +185,7 @@ def main():
         (ep_dir / "segmentation").mkdir(parents=True, exist_ok=True)
 
         joint_pos, joint_vel, gripper = [], [], []
-        ee_pose, obj_poses, action = [], [], []
+        ee_pose, fingertip_pose, obj_poses, action = [], [], [], []
         seg_info = None
 
         for f, q_f in enumerate(frames_q):
@@ -174,6 +216,7 @@ def main():
             joint_vel.append(qv[:7])
             gripper.append(qp[7:9])
             ee_pose.append(lab_scene.get_prim_world_pose(lab_scene.HAND_PATH))
+            fingertip_pose.append(lab_scene.get_fingertip_pos())
             obj_poses.append([
                 lab_scene.get_prim_world_pose(objects[n]["path"]) for n in obj_names
             ])
@@ -183,11 +226,12 @@ def main():
             str(ep_dir / "trajectory.npz"),
             joint_pos=np.array(joint_pos), joint_vel=np.array(joint_vel),
             gripper=np.array(gripper), ee_pose=np.array(ee_pose),
+            fingertip_pose=np.array(fingertip_pose),
             object_poses=np.array(obj_poses), action=np.array(action),
         )
 
         meta = {
-            "task": f"dip_into_tube[{TARGET_OBJECT}]",
+            "task": f"approach_tube_top[{TARGET_OBJECT}]",
             "n_frames": len(frames_q),
             "cameras": cam_names,
             "object_names": obj_names,
