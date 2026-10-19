@@ -1,0 +1,15 @@
+# Generated data: captures, renders, reconstructions, assets (GBs).
+# Everything here is reproducible from the scripts + isaac_validation/sim_snapshot.
+/depth_tests/
+/out/*
+!/out/markers_to_print/
+/isaac_validation/out/
+/isaac_validation/out_*/
+**/marker_textures/
+*.log
+__pycache__/
+*.pyc
+# never commit credentials
+.env
+*.key
+secrets/

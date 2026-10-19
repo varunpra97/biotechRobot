@@ -1,0 +1,4 @@
+{
+  "_comment": "MANUAL STAND-IN for scene_reasoning output on the sample tray, used only until LLM runs are possible (no API credentials yet). Only what the model would read off the photos: a 2x5 grid of round wells, roughly 10mm apart. Height, well radius and pitch are FITTED from the images; these values only initialize the fit.",
+  "well_grid": {"rows": 2, "cols": 5, "pitch_mm": 10.0, "radius_hint_mm": 3.0}
+}

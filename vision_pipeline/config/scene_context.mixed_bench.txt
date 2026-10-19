@@ -1,0 +1,11 @@
+A laboratory / workshop bench photographed from all sides with a handheld RGB-D
+camera. Two white calibration cubes with ArUco markers and a few flat printed
+markers are calibration equipment, not scene objects.
+
+The bench holds assorted objects: labware (racks and holders with tubes, small
+centrifuges, trays, containers) and general items (bottles, boxes, boards, metal
+parts). Many are assemblies of several separate, removable parts in contact --
+tubes standing in a rack, a rotor inside a housing, items standing in a tray, a
+lid or cap sitting on its container -- and parts of one assembly can be made of
+different materials (plastics, metals, wood, ceramic). The simulation needs every
+removable part as its own object with its own material and mass.

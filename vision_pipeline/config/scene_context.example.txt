@@ -1,0 +1,12 @@
+A biotech / molecular-biology laboratory bench, photographed from all sides with a
+handheld camera. Two white calibration cubes with ArUco markers and a few flat
+printed markers are calibration equipment, not scene objects.
+
+Objects that may be on the bench (not necessarily all present, possibly others):
+- test tube racks / holders with a grid of bores, with or without tubes in them
+- test tubes and centrifuge tubes (e.g. 1.5 mL microcentrifuge tubes, 15/50 mL conical tubes)
+- a benchtop microcentrifuge
+- electronic or manual single-channel pipettes
+- pipette tip racks (e.g. 96 or 100 tips) and loose tips
+- sample trays / multi-well plates (e.g. SBS-footprint microplates)
+- small waste bins or containers

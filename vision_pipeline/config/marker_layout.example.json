@@ -1,0 +1,22 @@
+{
+  "_comment": "Positions are in the platform frame: origin at the center of the physical bench/platform TOP SURFACE, Z up, meters. Measure once with a tape measure and a level. Each marker is a printed ArUco tag from the DICT_4X4_50 dictionary (see markers.DEFAULT_DICTIONARY), with a unique id. Two equivalent ways to specify a marker's 3D position are shown below -- use whichever is easier to measure.",
+
+  "markers": {
+    "0": {
+      "_comment": "center/axes form: marker lying flat on the bench surface at its front-left corner, facing +Z (up). x_axis/y_axis span the marker's own plane; need not be unit length, just directions.",
+      "center": [-0.6, -0.3, 0.0],
+      "x_axis": [1, 0, 0],
+      "y_axis": [0, 1, 0],
+      "side_length_m": 0.05
+    },
+    "1": {
+      "_comment": "explicit corners_3d form: top-left, top-right, bottom-right, bottom-left, as the marker is viewed upright. Use this for a marker that's standing upright on a wall/riser rather than flat.",
+      "corners_3d": [
+        [0.6, -0.3, 0.05],
+        [0.65, -0.3, 0.05],
+        [0.65, -0.3, 0.0],
+        [0.6, -0.3, 0.0]
+      ]
+    }
+  }
+}

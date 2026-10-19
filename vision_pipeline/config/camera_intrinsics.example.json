@@ -1,0 +1,15 @@
+{
+  "_comment": "Produce this file with scripts/calibrate_camera.py (chessboard calibration), one entry per physical camera_id used in your capture manifest. dist follows OpenCV's (k1, k2, p1, p2, k3, ...) convention.",
+
+  "cameras": {
+    "phone_main": {
+      "K": [
+        [1400.0, 0.0, 960.0],
+        [0.0, 1400.0, 540.0],
+        [0.0, 0.0, 1.0]
+      ],
+      "dist": [0.05, -0.1, 0.0, 0.0, 0.02],
+      "image_size": [1920, 1080]
+    }
+  }
+}

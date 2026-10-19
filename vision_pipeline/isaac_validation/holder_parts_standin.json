@@ -1,0 +1,9 @@
+{
+  "_comment": "MANUAL STAND-IN for scene_reasoning's 'decomposition' output on the tube holder, used only until LLM runs are possible (no API credentials yet). It contains only what the model would read off the photos: a 4x5 grid of upright tubes, roughly 60mm apart. Pitch, radius and tube height are all FITTED from the images; these values only initialize the fit.",
+  "is_composite": true,
+  "parts": [
+    {"name": "test tubes", "count": 20, "shape_family": "tube_with_conical_tip", "removable": true,
+     "grid_rows": 4, "grid_cols": 5, "pitch_mm": 60.0, "radius_hint_mm": 5.0, "notes": "stand-in"}
+  ],
+  "reasoning": "stand-in"
+}
