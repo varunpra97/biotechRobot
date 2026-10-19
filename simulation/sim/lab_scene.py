@@ -734,16 +734,20 @@ FINGER_JOINT_PATHS = (LEFT_FINGER_PATH + "/finger_joint1", RIGHT_FINGER_PATH + "
 # (cad_source/probe_finger_contact.py), and at 8 N a held tube jittered up
 # to 5 mm per step; at 4 N it holds to 0.06 mm (probe_grasp_jitter.py).
 # (High-friction rubber pads made a held tube jitter again -- 2.5 mm.)
-# The drive is a soft spring toward fully closed (k = 1000 N/m), so the grip
-# scales with the object's width: ~3.4 N on a 7 mm tube, ~9 N on the 18 mm
-# pipette body, ~12 N across the 24 mm sample tray (Franka allows up to 70 N).
+# The drive is a soft spring toward fully closed, so the grip scales with
+# the object's width. At k = 1000 N/m (~9 N on the pipette) a held pipette
+# crept 1.5-3 deg per primitive about the closing axis -- also while the arm
+# held still (a steady torque from its off-axis centre of mass), 20 deg over
+# a pipetting chain. At k = 2300 N/m: ~21 N on the 18 mm pipette body, ~8 N
+# on a 7 mm tube, ~28 N across the 24 mm sample tray -- within the Franka
+# Hand's 70 N continuous (35 N per finger).
 # A stiff drive pinned at a force cap switched on/off as a held tube shifted
 # (a lift out of its bore slipped 0.4 mm or dropped it; soft: 0.02 mm, held
 # to 0.001 mm -- probe_grasp_jitter.py), and a 4 N cap let the 150 g pipette
 # pivot between the pads when the wrist turned it nozzle-down.
-FINGER_MAX_FORCE = 20.0     # N per finger
-FINGER_STIFFNESS = 1.0e3    # N/m toward fully closed
-FINGER_DAMPING = 40.0       # N*s/m (closes with a ~0.04 s time constant)
+FINGER_MAX_FORCE = 30.0     # N per finger
+FINGER_STIFFNESS = 2.3e3    # N/m toward fully closed
+FINGER_DAMPING = 60.0       # N*s/m (same damping ratio as the earlier 1000 N/m, 40 N*s/m)
 GRIPPER_STROKE = 0.04       # m per finger
 ARM_SOLVER_POSITION_ITERATIONS = 64
 
