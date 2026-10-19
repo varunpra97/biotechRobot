@@ -866,6 +866,8 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
 
     # ---------------- platform ----------------
     objects = build_platform(PLATFORM_CX, PLATFORM_CY, rigid_objects)
+    import appearance
+    appearance.apply(stage_utils.get_current_stage())     # materials + lab lighting (baseline look)
 
     # ---------------- fixed arm on pedestal ----------------
     # Pedestal top at BENCH_Z so the arm base is level with the platform.
@@ -1071,6 +1073,8 @@ def main():
                     help="GUI mode: tile all cameras in one window, viewed simultaneously")
     ap.add_argument("--list-cameras", action="store_true",
                     help="print camera names and exit")
+    ap.add_argument("--look-seeds", type=int, nargs="*", default=None,
+                    help="with --capture: also capture a randomized look per seed (appearance.py)")
     args = ap.parse_args()
 
     from isaacsim import SimulationApp
@@ -1083,7 +1087,7 @@ def main():
 
     out_dir = Path(args.out)
 
-    def capture():
+    def capture(suffix=""):
         from PIL import Image
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1091,7 +1095,7 @@ def main():
             simulation_app.update()
         for name, (prim_path, cam) in cams.items():
             rgb = cam.get_current_frame()["rgb"]
-            Image.fromarray(rgb).save(str(out_dir / f"{name}.png"))
+            Image.fromarray(rgb).save(str(out_dir / f"{name}{suffix}.png"))
         print(f"captured {len(cams)} images -> {out_dir}")
 
     if args.list_cameras:
@@ -1103,6 +1107,14 @@ def main():
 
     if args.capture:
         capture()
+        if args.look_seeds:
+            import random
+
+            import appearance
+            import isaacsim.core.experimental.utils.stage as stage_utils
+            for seed in args.look_seeds:
+                appearance.apply(stage_utils.get_current_stage(), random.Random(seed))
+                capture(f"_look{seed}")
         print("CAPTURE DONE:", out_dir)
     elif args.headless:
         for _ in range(60):

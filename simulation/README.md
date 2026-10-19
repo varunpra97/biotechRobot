@@ -8,7 +8,13 @@ accuracy of what the cameras see is the main requirement.
 
 ## Scene
 
-- **Room**: 10m x 6m x 3m, floor + walls, dome light + overhead work light.
+- **Room**: 10m x 6m x 3m, floor + walls, two ceiling light panels + dim
+  ambient fill. Physically based materials (`sim/appearance.py`): dark epoxy
+  bench top, clear borosilicate-glass tubes, translucent tips and tray,
+  plastic and metal labware. `--appearance random` randomizes the bench
+  top, walls, floor, light intensity / colour temperature / position,
+  labware and liquid colours from the run's seed (recorded in each
+  episode's metadata).
 - **Bench** (1.4m x 0.7m) with real CAD-derived props:
   - 5x4 test tube holder: parametric CAD with 8.0mm blind bores, 28mm deep
   - 20 test tubes: 7mm OD x 58mm, conical tip, standing on the bore floors
@@ -160,6 +166,7 @@ Output in `data/episodes/ep_XXXX/`:
 | `sim/planner.py`, `sim/franka_kinematics.py` | Collision-checked path planning; analytic Franka kinematics and IK |
 | `sim/pipette.py`, `sim/liquids.py` | Electronic pipette model (tips, plunger, liquid transfer); liquid volumes |
 | `sim/prompts.py` | Prompt templates per primitive |
+| `sim/appearance.py` | Materials, lab lighting and seeded appearance randomization |
 | `sim/view_episodes.py` | Plays recorded episodes from the two policy cameras |
 | `training/export_lerobot.py`, `training/pi05_lab.py` | LeRobot export; openpi LoRA fine-tune config |
 | `sim/collect_data_pickplace.py` | Earlier single pick-and-place episode (keyframes) |

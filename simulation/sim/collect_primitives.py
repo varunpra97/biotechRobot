@@ -30,6 +30,8 @@ def main():
     ap.add_argument("--out", default=r"C:\Users\varun\workspace\BiotechRobot\data\primitives")
     ap.add_argument("--only", default="all", choices=["all", "tubes", "pipette", "tray"])
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--appearance", default="baseline", choices=["baseline", "random"],
+                    help="random: materials, lighting and colours randomized from --seed (appearance.py)")
     args = ap.parse_args()
 
     from isaacsim import SimulationApp
@@ -50,6 +52,12 @@ def main():
     env.pipette = PipetteModel(env)
     planner = Planner(simulation_app, env.arm, [env.objects[n]["path"] for n in rigid])
     expert = PipetteExpert(env, planner, seed=args.seed)
+    import appearance
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    look = appearance.apply(stage_utils.get_current_stage(),
+                            random.Random(args.seed + 7919) if args.appearance == "random" else None)
+    for _ in range(10):        # let the renderer pick up the new materials before recording
+        simulation_app.update()
     out = Path(args.out)
     slot = prompts.slot_name(0, 2)
     bore = prompts.bore_name(BORE, lab_scene.CENTRIFUGE_SLEEVE_PARTS)
@@ -95,7 +103,9 @@ def main():
         prompt = prompts.make(name, rng, **kw)
         k = counts[name] = counts.get(name, -1) + 1
         env.recorder = lab_env.EpisodeRecorder(out / name / f"ep_{k:04d}", prompt,
-                                               meta={"primitive": name, "args": kw},
+                                               meta={"primitive": name, "args": kw,
+                                                     "appearance": args.appearance, "appearance_seed": args.seed,
+                                                     "look": look},
                                                wrist_camera=lab_env.PRIMITIVE_WRIST_CAMERA[name])
         t0 = time.time()
         res = run()
