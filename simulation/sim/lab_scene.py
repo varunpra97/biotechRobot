@@ -52,7 +52,7 @@ ARM_POS = (0.0, 1.1, BENCH_Z)
 
 FRANKA_USD = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
-    / "biotech-lab-robotics" / "assets" / "panda" / "panda.usda"
+    / "biotech-lab-robotics" / "simulation" / "assets" / "panda" / "panda.usda"
 )
 
 # Franka home pose (7 arm joints + 2 fingers) -- the arm is static, held here.
@@ -168,11 +168,17 @@ MM_TO_M = 0.001
 
 CAD_DIR = str(
     Path(r"C:\Users\varun\workspace\BiotechRobot")
-    / "biotech-lab-robotics" / "assets" / "cad"
+    / "biotech-lab-robotics" / "simulation" / "assets" / "cad"
 )
 TUBE_HOLDER_OBJ = f"{CAD_DIR}/tube_holder.obj"      # 5x4 rack, 8.0mm blind bores
-SAMPLE_TRAY_OBJ = f"{CAD_DIR}/sample_tray.obj"      # real 96-well plate (SBS standard)
+SAMPLE_TRAY_OBJ = f"{CAD_DIR}/sample_tray_5x2.obj"  # 10 wells (5x2, 9 mm pitch), gripper-width
+SAMPLE_TRAY_COLLISION_OBJ = f"{CAD_DIR}/sample_tray_5x2_collision.obj"
 PIPETTE_OBJ = f"{CAD_DIR}/pipette.obj"
+PIPETTE_COLLISION_OBJ = f"{CAD_DIR}/pipette_collision.obj"   # 7 convex pieces from its real cross-sections
+TIP_OBJ = f"{CAD_DIR}/pipette_tip.obj"              # P1000-style, sized to the pipette nozzle
+TIP_COLLISION_OBJ = f"{CAD_DIR}/pipette_tip_collision.obj"
+TIP_RACK_OBJ = f"{CAD_DIR}/tip_rack.obj"            # 10 x 10 tips, 9 mm pitch
+WASTE_BIN_OBJ = f"{CAD_DIR}/waste_bin.obj"
 CENTRIFUGE_OBJ = f"{CAD_DIR}/centrifuge.obj"
 TEST_TUBE_OBJ = f"{CAD_DIR}/test_tube.obj"          # 7mm OD x 58mm, conical tip; local z=0 at the tip
 TEST_TUBE_COLLISION_OBJ = f"{CAD_DIR}/test_tube_collision.obj"  # 40-vertex convex hull
@@ -194,6 +200,35 @@ HOLDER_BORE_FLOOR_MM = 12.0
 # flip to the far side of the wall and the tube is pushed out through it.
 # At 240 Hz (and 480) it seats and stays (cad_source/probe_release_variants.py).
 PHYSICS_HZ = 240
+
+# Right side of the bench (all from cad_source/make_*.py design values):
+SAMPLE_TRAY_XY = (0.30, 1.73)       # 52 x 24 mm, long side along x
+SAMPLE_TRAY_PITCH = 0.009
+# where the tray may be set down (bench xy); "right" is clear of the tip
+# rack (x 0.27-0.37, y <= 1.58) and the waste bin (y <= 1.575)
+TRAY_SPOTS_XY = {"home": SAMPLE_TRAY_XY, "right": (0.45, 1.70)}
+TRAY_MASS_KG = 0.015                # 13.9 cm^3 polystyrene
+TIP_RACK_XY = (0.32, 1.53)          # 100 x 100 mm, 55 mm tall
+TIP_RACK_HEIGHT = 0.055
+TIP_PITCH = 0.009
+TIP_COLLAR_Z = 0.052                # tip local z of the collar's underside (rests on the rack)
+TIP_LENGTH = 0.060
+TIP_MASS_KG = 0.001
+WASTE_BIN_XY = (0.49, 1.53)         # 90 x 90 x 70 mm open box
+PIPETTE_XY = (0.21, 1.58)           # nozzle end; lies along +y. 6 cm clear of the holder:
+                                    # grasping across it puts the 21 cm-wide hand over its side
+PIPETTE_MASS_KG = 0.15              # electronic pipette
+# initial liquid (uL, RGB) in holder tubes; everything else starts empty
+# A 1000 uL tip's end can go at most ~36 mm below a 6 mm-bore tube's rim
+# before its widening body reaches the wall, so a tube can be aspirated from
+# only while it holds more than ~570 uL (surface 25 mm above the tube's base);
+# source tubes start fuller than that.
+INITIAL_LIQUIDS = {
+    "tube_r0_c0": (900.0, (0.15, 0.75, 0.25)),
+    "tube_r1_c0": (1200.0, (0.15, 0.35, 0.90)),
+    "tube_r1_c2": (1000.0, (0.85, 0.15, 0.15)),
+}
+LIQUIDS = {}                        # container name -> liquids.LiquidBody (filled by build_platform)
 
 TUBE_MASS_KG = 0.0015   # 580.6 mm^3 of borosilicate glass (2.23 g/cm^3) ~1.3 g, + residue
 
@@ -285,10 +320,16 @@ def load_mesh_prim(prim_path, obj_path, pos, yaw_deg=0.0, pitch_deg=0.0,
     else:
         UsdGeom.Xform.Define(stage, prim_path)
         _define_mesh(stage, f"{prim_path}/visual", mesh, color)
-        cm = _define_mesh(stage, f"{prim_path}/collision",
-                          trimesh.load(collision_obj, force="mesh"))
-        UsdGeom.Imageable(cm).CreatePurposeAttr(UsdGeom.Tokens.guide)
-        collider_path = f"{prim_path}/collision"
+        # one convex collider per connected piece of the collision mesh
+        # process=False: welding coincident vertices would fuse touching
+        # pieces (e.g. the pipette's bands share their boundary outlines)
+        pieces = trimesh.load(collision_obj, force="mesh", process=False).split(only_watertight=False)
+        collider_path = []
+        for i, piece in enumerate(pieces):
+            cp = f"{prim_path}/collision" if len(pieces) == 1 else f"{prim_path}/collision_{i}"
+            cm = _define_mesh(stage, cp, piece)
+            UsdGeom.Imageable(cm).CreatePurposeAttr(UsdGeom.Tokens.guide)
+            collider_path.append(cp)
 
     def _rot(axis, deg):
         c, s = np.cos(np.radians(deg)), np.sin(np.radians(deg))
@@ -300,7 +341,8 @@ def load_mesh_prim(prim_path, obj_path, pos, yaw_deg=0.0, pitch_deg=0.0,
     set_prim_world_pose(prim_path, pos, matrix_to_quat(R))
 
     if collision:
-        _apply_collider(stage, collider_path, approximation, material)
+        for cp in ([collider_path] if isinstance(collider_path, str) else collider_path):
+            _apply_collider(stage, cp, approximation, material)
     return prim_path, tuple(float(v) for v in mesh.extents)
 
 
@@ -314,7 +356,7 @@ def collider_paths(path):
             if p.HasAPI(UsdPhysics.CollisionAPI)]
 
 
-def make_rigid_body(path, mass_kg, kinematic=True, contact_offset=0.001):
+def make_rigid_body(path, mass_kg, kinematic=True, contact_offset=0.001, report_contacts=True):
     """Turn a prim (and the colliders under it) into a PhysX rigid body
     with a real mass. Starts kinematic (pose driven by set_prim_world_pose,
     e.g. while held rigidly by the gripper); set_kinematic(path, False)
@@ -335,7 +377,8 @@ def make_rigid_body(path, mass_kg, kinematic=True, contact_offset=0.001):
     # a released object's resting contact (penetration depth) via the
     # contact report.
     prb.CreateSleepThresholdAttr(0.0)
-    PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr(0.0)
+    if report_contacts:
+        PhysxSchema.PhysxContactReportAPI.Apply(prim).CreateThresholdAttr(0.0)
     for cp in collider_paths(path):
         pc = PhysxSchema.PhysxCollisionAPI.Apply(stage.GetPrimAtPath(cp))
         pc.CreateContactOffsetAttr(float(contact_offset))
@@ -366,6 +409,45 @@ def contacts_of(body_path):
             e["impulse"] += float(np.linalg.norm([c.impulse.x, c.impulse.y, c.impulse.z]))
             e["n"] += 1
     return out
+
+
+def set_gravity(path, enabled):
+    """Switch gravity on/off for one rigid body (e.g. a held object being
+    teleported along a planned path, so it stays exactly where placed)."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import PhysxSchema
+
+    prim = stage_utils.get_current_stage().GetPrimAtPath(path)
+    PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateDisableGravityAttr().Set(not enabled)
+
+
+def zero_velocity(path):
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Gf, UsdPhysics
+
+    rb = UsdPhysics.RigidBodyAPI(stage_utils.get_current_stage().GetPrimAtPath(path))
+    rb.CreateVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+    rb.CreateAngularVelocityAttr().Set(Gf.Vec3f(0.0, 0.0, 0.0))
+
+
+def _filter_tip_collisions(objects, others):
+    """Tips never collide with tube or well interiors, the rack, or the
+    pipette nozzle: those are hollow insides (or a press fit) that the
+    tip's convex collider can't represent, so a tip inside them is checked
+    analytically by the pipette model instead. Authored once, before the
+    simulation starts (changing filters later makes PhysX rebuild bodies)."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import Sdf, UsdPhysics
+
+    stage = stage_utils.get_current_stage()
+    paths = set()
+    for p in others:  # the objects and their actual collider prims
+        paths.add(p)
+        paths.update(collider_paths(p))
+    targets = [Sdf.Path(p) for p in sorted(paths)]
+    for n, o in objects.items():
+        if n.startswith("tip_"):
+            UsdPhysics.FilteredPairsAPI.Apply(stage.GetPrimAtPath(o["path"]))                 .CreateFilteredPairsRel().SetTargets(targets)
 
 
 def set_collision_filter(path, other_paths):
@@ -514,8 +596,8 @@ def centrifuge_pos(cx=PLATFORM_CX, cy=PLATFORM_CY):
 
 def build_platform(cx, cy, rigid_objects=()):
     """Open test-tube platform: support stand, bench top, real CAD-derived
-    props (tube holder + 20 test tubes, 96-well plate, 2 pipettes), work
-    light.
+    props (tube holder + 20 test tubes, centrifuge, electronic pipette,
+    10-well sample tray, 100-tip rack, waste bin, liquids), work light.
 
     rigid_objects: names of tubes to make (kinematic) rigid bodies, e.g.
     the one a task will pick up -- everything else stays a static collider.
@@ -558,25 +640,58 @@ def build_platform(cx, cy, rigid_objects=()):
                 make_rigid_body(path, TUBE_MASS_KG, kinematic=True)
             objects[name] = {"path": path, "size": tube_extents}
 
-    # ---- 2 pipettes (real model, lying flat) ----
-    # Mesh origin isn't at its base (local Z spans -0.041 to +0.015), so
-    # without this offset most of the pipette sat below the bench surface.
-    pipette_extents = (0.0188, 0.181, 0.056)
-    pipette_z_offset = 0.041
-    for i, off in enumerate((-0.2, -0.28)):
-        px, py = cx + 0.15, cy + off
-        path = f"{root}/Pipette{i}"
-        load_mesh_prim(path, PIPETTE_OBJ, (px, py, pz + pipette_z_offset),
-                       color=(0.45, 0.5, 0.55), material="plastic")
-        objects[f"pipette_{i}"] = {"path": path, "size": pipette_extents}
+    # ---- electronic pipette, lying on the bench (settles physically) ----
+    # Mesh origin isn't at its base (local Z spans -0.041 to +0.015), so it
+    # starts lifted by that much. One pipette: an earlier layout had two
+    # overlapping each other, harmless only while they were static meshes.
+    path = f"{root}/Pipette0"
+    load_mesh_prim(path, PIPETTE_OBJ, (PIPETTE_XY[0], PIPETTE_XY[1], pz + 0.041),
+                   color=(0.45, 0.5, 0.55), material="plastic", approximation="convexHull",
+                   collision_obj=PIPETTE_COLLISION_OBJ)
+    if "pipette_0" in rigid_objects:
+        make_rigid_body(path, PIPETTE_MASS_KG, kinematic=True)
+    objects["pipette_0"] = {"path": path, "size": (0.0188, 0.181, 0.056)}
 
-    # ---- sample tray (real 96-well plate, SBS standard dimensions) ----
-    tray_extents = (0.128, 0.0855, 0.0146)
-    tx, ty = cx + 0.35, cy - 0.1
+    # ---- 10-well sample tray (5 x 2), narrow enough to grip across ----
     tray_path = f"{root}/SampleTray"
-    load_mesh_prim(tray_path, SAMPLE_TRAY_OBJ, (tx, ty, pz),
-                   color=(0.6, 0.6, 0.9), material="plastic")
-    objects["tray"] = {"path": tray_path, "size": tray_extents}
+    _, tray_ext = load_mesh_prim(tray_path, SAMPLE_TRAY_OBJ, (*SAMPLE_TRAY_XY, pz),
+                                 color=(0.6, 0.6, 0.9), material="plastic",
+                                 approximation="convexHull", collision_obj=SAMPLE_TRAY_COLLISION_OBJ)
+    if "tray" in rigid_objects:
+        make_rigid_body(tray_path, TRAY_MASS_KG, kinematic=True)
+    objects["tray"] = {"path": tray_path, "size": tray_ext}
+
+    # ---- 100-tip rack, tips hanging by their collars, and a waste bin ----
+    rx, ry = TIP_RACK_XY
+    load_mesh_prim(f"{root}/TipRack", TIP_RACK_OBJ, (rx, ry, pz), color=(0.25, 0.45, 0.8),
+                   material="plastic", approximation="none")
+    load_mesh_prim(f"{root}/WasteBin", WASTE_BIN_OBJ, (*WASTE_BIN_XY, pz), color=(0.5, 0.52, 0.55),
+                   material="plastic", approximation="none")
+    tip_z = pz + TIP_RACK_HEIGHT - TIP_COLLAR_Z
+    tube_paths = [o["path"] for n, o in objects.items() if n.startswith("tube_")]
+    for r in range(10):
+        for c in range(10):
+            name = f"tip_{'ABCDEFGHIJ'[r]}{c + 1}"
+            path = f"{root}/Tips/{name}"
+            load_mesh_prim(path, TIP_OBJ, (rx + (c - 4.5) * TIP_PITCH, ry + (r - 4.5) * TIP_PITCH, tip_z),
+                           color=(0.93, 0.93, 0.9), material="plastic", approximation="convexHull",
+                           collision_obj=TIP_COLLISION_OBJ)
+            make_rigid_body(path, TIP_MASS_KG, kinematic=True, report_contacts=False)
+            objects[name] = {"path": path, "size": (0.0082, 0.0082, TIP_LENGTH)}
+    _filter_tip_collisions(objects, tube_paths + [tray_path, f"{root}/TipRack", objects["pipette_0"]["path"]])
+
+    # ---- liquids ----
+    import liquids
+
+    LIQUIDS.clear()
+    for name, (vol, color) in INITIAL_LIQUIDS.items():
+        LIQUIDS[name] = liquids.LiquidBody(objects[name]["path"], liquids.TUBE, vol, color)
+    for j in range(2):
+        for i in range(5):
+            wname = f"well_{'AB'[j]}{i + 1}"
+            off = ((i - 2) * SAMPLE_TRAY_PITCH, (j - 0.5) * SAMPLE_TRAY_PITCH, 0.0)
+            LIQUIDS[f"tray/{wname}"] = liquids.LiquidBody(tray_path, liquids.WELL, 0.0,
+                                                          (0.2, 0.3, 0.9), offset=off, name=f"liquid_{wname}")
 
     # ---- centrifuge, to the LEFT of the test tube holder, upright, no lid ----
     centrifuge_body = load_centrifuge(f"{root}/CentrifugeBody", centrifuge_pos(cx, cy),
@@ -596,6 +711,77 @@ def build_platform(cx, cy, rigid_objects=()):
     _lx.AddTranslateOp().Set(Gf.Vec3d(cx, cy, BENCH_Z + 1.3))
 
     return objects
+
+
+# The policy's exterior camera (platform_cam1): fixed, so it frames the WHOLE
+# platform -- every task's objects stay in view, and a policy pipeline can
+# crop per task later if it helps. Far side of the bench, in the original
+# platform_cam1 viewing direction, 45 deg down, 1.6 m from the bench center
+# (60 deg horizontal FOV -> ~1.85 m wide at the bench, which is 1.4 m).
+EXTERIOR_CAM_TARGET = (PLATFORM_CX, PLATFORM_CY - 0.05, BENCH_Z + 0.05)
+_az = np.array([1.2, 1.1]) / np.linalg.norm([1.2, 1.1])
+_el = np.radians(45.0)
+_dir = np.array([_az[0] * np.cos(_el), _az[1] * np.cos(_el), np.sin(_el)])
+EXTERIOR_CAM_EYE = tuple(np.array(EXTERIOR_CAM_TARGET) + 1.6 * _dir)
+EXTERIOR_CAM_FOCAL = 18.0
+
+FINGER_JOINT_PATHS = (LEFT_FINGER_PATH + "/finger_joint1", RIGHT_FINGER_PATH + "/finger_joint2")
+# Franka Hand: up to 70 N continuous grasp force, 80 mm stroke. Each finger
+# drive is stiff with its force capped, so "close" squeezes with an ~constant
+# force until the pads stop on the object -- a real friction grasp -- instead
+# of parking the fingers at a pre-computed width. 4 N per finger (8 N
+# grasp): at 35 N the solver crushed the pads straight through a 1.5 g tube
+# (cad_source/probe_finger_contact.py), and at 8 N a held tube jittered up
+# to 5 mm per step; at 4 N it holds to 0.06 mm (probe_grasp_jitter.py).
+# (High-friction rubber pads made a held tube jitter again -- 2.5 mm.)
+# The drive is a soft spring toward fully closed (k = 1000 N/m), so the grip
+# scales with the object's width: ~3.4 N on a 7 mm tube, ~9 N on the 18 mm
+# pipette body, ~12 N across the 24 mm sample tray (Franka allows up to 70 N).
+# A stiff drive pinned at a force cap switched on/off as a held tube shifted
+# (a lift out of its bore slipped 0.4 mm or dropped it; soft: 0.02 mm, held
+# to 0.001 mm -- probe_grasp_jitter.py), and a 4 N cap let the 150 g pipette
+# pivot between the pads when the wrist turned it nozzle-down.
+FINGER_MAX_FORCE = 20.0     # N per finger
+FINGER_STIFFNESS = 1.0e3    # N/m toward fully closed
+FINGER_DAMPING = 40.0       # N*s/m (closes with a ~0.04 s time constant)
+GRIPPER_STROKE = 0.04       # m per finger
+ARM_SOLVER_POSITION_ITERATIONS = 64
+
+
+def configure_franka_physics(gravity_compensation=True):
+    """Physics settings the asset leaves out or gets wrong for grasping:
+    - finger pads collide as the pads you see. The asset disables collision
+      on the visible pad meshes and collides only with small hidden boxes,
+      four of them 2.5 mm off the finger centerline -- on a 7 mm tube the
+      fingers stopped 1 mm inside the visible tube surface. The pad mesh's
+      convex hull is a flat face, which is what the camera shows.
+    - both finger joints get a force-limited position drive (only one had
+      any drive gains at all);
+    - 64 solver position iterations for the arm: squeezing a 1.5 g tube
+      between 15 g fingers needs them (at the default the pads slowly sank
+      through it; at 64, 0.17 mm penetration, the tube held still);
+    - gravity compensation: the real Franka's controller cancels the arm's
+      own weight; here that's done by not applying gravity to the arm links
+      (Isaac Lab's Franka setup does the same). Payloads still have weight."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    stage = stage_utils.get_current_stage()
+    for finger in (LEFT_FINGER_PATH, RIGHT_FINGER_PATH):
+        stage.GetPrimAtPath(finger + "/finger_1").SetInstanceable(False)
+        pad = finger + "/finger_1/finger_1"
+        UsdPhysics.CollisionAPI(stage.GetPrimAtPath(pad)).GetCollisionEnabledAttr().Set(True)
+    PhysxSchema.PhysxArticulationAPI.Apply(stage.GetPrimAtPath("/World/Arm/Geometry/link0")) \
+        .CreateSolverPositionIterationCountAttr(ARM_SOLVER_POSITION_ITERATIONS)
+    for jp in FINGER_JOINT_PATHS:
+        drive = UsdPhysics.DriveAPI.Apply(stage.GetPrimAtPath(jp), "linear")
+        drive.CreateStiffnessAttr(FINGER_STIFFNESS)
+        drive.CreateDampingAttr(FINGER_DAMPING)
+        drive.CreateMaxForceAttr(FINGER_MAX_FORCE)
+    if gravity_compensation:
+        for prim in Usd.PrimRange(stage.GetPrimAtPath("/World/Arm")):
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                PhysxSchema.PhysxRigidBodyAPI.Apply(prim).CreateDisableGravityAttr(True)
 
 
 def tile_camera_views(cams, tile_w=480, tile_h=360, cols=3):
@@ -693,6 +879,8 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
     # Arm base yawed 90 deg so local +x (reach direction) points in world +y,
     # towards the platform.
     set_prim_pose("/World/Arm", ARM_POS, 90.0)
+    configure_franka_physics()
+    add_wrist_camera_mount()
 
     # ---------------- cameras ----------------
     import omni.replicator.core as rep
@@ -702,6 +890,11 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
         rep.create.camera(position=tuple(eye), look_at=tuple(target), name=name,
                           focal_length=focal_length)
         prim_path = f"/Replicator/{name}_Xform/{name}"
+        # Replicator's default near clip is ~1 m: anything closer is cut away
+        # (a camera 0.85 m from the work area showed the cut-open insides of
+        # the bench and stand, rendered black).
+        UsdGeom.Camera(stage_utils.get_current_stage().GetPrimAtPath(prim_path)) \
+            .GetClippingRangeAttr().Set(Gf.Vec2f(0.01, 1000.0))
         cam = Camera(prim_path, resolution=res)
         cam.initialize()
         return (prim_path, cam)
@@ -724,12 +917,17 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
         eye = (ARM_POS[0] + sx, ARM_POS[1] - 1.4, 1.7)
         target = (PLATFORM_CX, PLATFORM_CY, BENCH_Z + 0.2)
         cams[f"arm_cam{j}"] = aim(f"arm_cam{j}", eye, target, (640, 480))
-    # 2 behind the tube platform, looking back at the arm
-    for j, sx in enumerate((-1.0, 1.0)):
-        eye = (PLATFORM_CX + sx, PLATFORM_CY + PLATFORM_D / 2 + 0.6, BENCH_Z + 0.9)
-        target = (ARM_POS[0], ARM_POS[1], ARM_POS[2] + 0.3)
-        cams[f"platform_cam{j}"] = aim(f"platform_cam{j}", eye, target,
-                                       (640, 480), focal_length=18.0)
+    # 2 behind the tube platform, looking back at the arm. platform_cam1 is
+    # the policy's exterior camera, so it's framed on the workspace instead
+    # of the whole room: same viewing direction as the original wide shot,
+    # but ~1 m from the work area and aimed between the holder and the
+    # centrifuge (the wide version left the centrifuge ~20 px across and the
+    # tube ~1 px once resized to the model's 224x224 input).
+    eye = (PLATFORM_CX - 1.0, PLATFORM_CY + PLATFORM_D / 2 + 0.6, BENCH_Z + 0.9)
+    target = (ARM_POS[0], ARM_POS[1], ARM_POS[2] + 0.3)
+    cams["platform_cam0"] = aim("platform_cam0", eye, target, (640, 480), focal_length=18.0)
+    cams["platform_cam1"] = aim("platform_cam1", EXTERIOR_CAM_EYE, EXTERIOR_CAM_TARGET,
+                                (640, 480), focal_length=EXTERIOR_CAM_FOCAL)
     # 1 straight overhead top-down view of the whole platform.
     top_eye = (PLATFORM_CX, PLATFORM_CY, BENCH_Z + 1.6)
     top_target = (PLATFORM_CX, PLATFORM_CY, BENCH_Z)
@@ -749,39 +947,112 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
     # transforming the finger links' world position into the hand's local
     # frame (pure +Z offset, no X/Y component).
     #
-    # Mounting dead-center on that axis was tried first and rejected: at an
-    # actual grasp (fingers closed on a tube) the camera's own forward path
-    # runs straight between the fingers, so it ends up looking directly
-    # into the finger pad / grasped object at point-blank range (confirmed
-    # empirically -- that placement rendered almost solid black/occluded
-    # when tested at a real grasp pose, not just at the empty home pose).
-    # A real eye-in-hand camera is mounted to the side of the gripper body
-    # for the same reason. Offsetting sideways along local X and yawing
-    # back in towards the approach axis keeps the grasp point framed
-    # without the camera's own view path running through the gripper's
-    # closing gap -- also verified empirically against a real grasp pose
-    # (descend_to_grasp), comparing centered vs. offset/yawed placements.
-    from pxr import Gf, UsdGeom
-    stage = stage_utils.get_current_stage()
-    eih_path = f"{HAND_PATH}/EyeInHandCamera"
-    usd_cam = UsdGeom.Camera.Define(stage, eih_path)
-    usd_cam.CreateFocalLengthAttr(24.0)
-    usd_cam.CreateClippingRangeAttr(Gf.Vec2f(0.005, 1000.0))
-    xf = UsdGeom.Xformable(usd_cam)
-    xf.ClearXformOpOrder()
-    xf.AddTranslateOp().Set(Gf.Vec3d(0.07, 0.0, 0.04))
-    # USD cameras look down their own local -Z with +Y up. RotateY first
-    # yaws the view 30 deg back toward the approach axis (in the prim's own
-    # unrotated frame), then RotateX(180) flips forward from the hand's
-    # local -Z (back into the arm) to its local +Z (toward the fingers) --
-    # USD applies xform ops in the order added, each in the frame left by
-    # the previous one.
-    xf.AddRotateYOp().Set(-30.0)
-    xf.AddRotateXOp().Set(180.0)
-    cams["wrist"] = (eih_path, Camera(eih_path, resolution=(640, 480)))
-    cams["wrist"][1].initialize()
+    # Three of them (WRIST_CAMERAS): no single wrist view showed every
+    # primitive well, so each primitive's episodes train on the best one
+    # (PRIMITIVE_WRIST_CAMERA in lab_env.py).
+    for name, cfg in WRIST_CAMERAS.items():
+        cams[name] = add_hand_camera(f"{HAND_PATH}/{name}", cfg["eye"], cfg["target"], cfg["focal"],
+                                     right=cfg["right"])
 
     return arm, cams, objects
+
+
+# Wrist cameras: three small 25 x 25 x 20 mm modules on aluminium brackets
+# bolted to the hand (cad_source/make_wrist_camera_mount.py builds them and
+# checks that no bracket shows up in any of the three views). Hand frame:
+# z = approach (fingertips at z = 0.1123), y = finger closing axis,
+# x = y x z; the hand body spans x +-18 mm (side faces, z 15-60 mm),
+# y -104..+100 mm, z up to 66 mm; the fingers stay within x +-10.5 mm,
+# y +-66 mm. A held pipette lies along hand x, nozzle toward -x (head toward
+# +x), and tilts 0-18 deg in the grasp.
+#
+# No single view showed every primitive well (studied with the user,
+# 2026-10-18), so there are three, and each primitive trains on its best:
+#  - wrist_top: right beside the fingers on +x, looking straight down the
+#    approach axis -- the grip, the held tube (into its open top), the
+#    holder slot or centrifuge bore right below it. Tube primitives.
+#  - wrist_side: on the nozzle side (-x) at fingertip level, out along +y --
+#    the grip on the pipette body, the whole pipette, its tip and the tube /
+#    well / rack the tip works in. Pipette primitives.
+#  - wrist_high: above the gripper on the head side, biased 12 cm along +y,
+#    level with the hand's bottom -- the whole held object and its
+#    surroundings from a step back (tray, bench spots, transits).
+# Plates: wrist_top on the +x side face; wrist_side and wrist_high share a
+# plate on the top (wrist-side) face. Image right per `right` (None: image
+# up toward the wrist, as on DROID's wrist camera).
+WRIST_CAMERAS = {
+    "wrist_top": dict(eye=(0.045, 0.0, 0.035), target=(0.0, 0.0, 0.14), right=None, focal=9.0,
+                      plate="side_x"),
+    "wrist_side": dict(eye=(-0.065, 0.110, 0.060), target=(-0.0597, -0.0338, 0.1023), right=(1.0, 0.0, 0.0),
+                       focal=8.0, plate="top"),
+    "wrist_high": dict(eye=(0.090, 0.120, 0.078), target=(-0.0087, 0.0177, 0.1257),
+                       right=(0.753, -0.597, 0.278), focal=10.0, plate="top"),
+}
+WRIST_CAM_MOUNT_OBJ = f"{CAD_DIR}/wrist_camera_mount.obj"                    # visual, all three
+WRIST_CAM_MOUNT_COLLISION_OBJ = f"{CAD_DIR}/wrist_camera_mount_collision.obj"  # convex pieces
+
+
+def wrist_camera_frame(eye, target, right=None):
+    """Camera axes in the hand frame as columns (USD camera: looks down -Z,
+    +Y up). Image right as close as possible to `right` if given (hand +x:
+    a held pipette runs along the image's wide axis), else image up as
+    close as possible to the hand's -z."""
+    fwd = np.asarray(target, float) - np.asarray(eye, float)
+    zc = -fwd / np.linalg.norm(fwd)
+    if right is not None:
+        xc = np.asarray(right, float) - (np.asarray(right, float) @ zc) * zc
+        xc /= np.linalg.norm(xc)
+        return np.stack([xc, np.cross(zc, xc), zc], axis=1)
+    up = np.array([0.0, 0.0, -1.0])
+    yc = up - (up @ zc) * zc
+    yc /= np.linalg.norm(yc)
+    return np.stack([np.cross(yc, zc), yc, zc], axis=1)
+
+
+def add_wrist_camera_mount():
+    """The camera brackets + camera bodies as part of the hand link: a
+    visual mesh and convex colliders (plates, arms, camera bodies) under the
+    hand, so they move with it, collide like the real hardware, and are
+    collision-checked by the planner with the rest of the arm. Must run
+    before the simulation starts (colliders added to an articulation link
+    at runtime would rebuild it)."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    import trimesh
+    from pxr import UsdGeom
+
+    stage = stage_utils.get_current_stage()
+    root = f"{HAND_PATH}/CameraMount"
+    UsdGeom.Xform.Define(stage, root)
+    _define_mesh(stage, f"{root}/visual", trimesh.load(WRIST_CAM_MOUNT_OBJ, force="mesh"), (0.12, 0.12, 0.13))
+    pieces = trimesh.load(WRIST_CAM_MOUNT_COLLISION_OBJ, force="mesh", process=False).split(only_watertight=False)
+    for i, piece in enumerate(pieces):
+        cp = f"{root}/collision_{i}"
+        UsdGeom.Imageable(_define_mesh(stage, cp, piece)).CreatePurposeAttr(UsdGeom.Tokens.guide)
+        _apply_collider(stage, cp, "convexHull", "plastic")
+    return root
+
+
+def add_hand_camera(path, eye, target, focal_length, resolution=(640, 480), right=None):
+    """Camera prim rigidly parented under the hand link (it moves with the
+    gripper like a camera bolted to it), at hand-local `eye`, looking at
+    hand-local `target`, rolled per wrist_camera_frame(). Returns (path,
+    isaacsim Camera)."""
+    import isaacsim.core.experimental.utils.stage as stage_utils
+    from isaacsim.sensors.camera import Camera
+    from pxr import Gf, UsdGeom
+
+    stage = stage_utils.get_current_stage()
+    usd_cam = UsdGeom.Camera.Define(stage, path)
+    usd_cam.CreateFocalLengthAttr(float(focal_length))
+    usd_cam.CreateClippingRangeAttr(Gf.Vec2f(0.005, 1000.0))
+    q = matrix_to_quat(wrist_camera_frame(eye, target, right))
+    xf = UsdGeom.Xformable(usd_cam)
+    xf.ClearXformOpOrder()
+    xf.AddTranslateOp().Set(Gf.Vec3d(*map(float, eye)))
+    xf.AddOrientOp().Set(Gf.Quatf(float(q[0]), Gf.Vec3f(*map(float, q[1:]))))
+    cam = Camera(path, resolution=resolution)
+    cam.initialize()
+    return (path, cam)
 
 
 def main():
