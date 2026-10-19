@@ -29,7 +29,7 @@ from markers import DEFAULT_DICTIONARY, MarkerLayout, corners_from_center_axes
 
 RNG = np.random.default_rng(42)
 
-# Platform footprint matches biotech-lab-robotics/sim/lab_scene.py
+# Platform footprint matches biotech-lab-robotics/simulation/sim/lab_scene.py
 # (PLATFORM_W, PLATFORM_D), so this fixture doubles as a sanity check
 # that marker placements sized for the real bench are detectable at all.
 PLATFORM_W, PLATFORM_D = 1.4, 0.7

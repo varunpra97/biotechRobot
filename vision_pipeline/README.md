@@ -33,7 +33,7 @@ its silhouette and an open-vocabulary label, not looked up.
 
 ## Coordinate convention
 
-Matches `biotech-lab-robotics/sim/lab_scene.py`'s platform convention so
+Matches `biotech-lab-robotics/simulation/sim/lab_scene.py`'s platform convention so
 reconstructed objects drop in with zero re-expressing:
 
 - Origin: center of the physical bench/platform top surface.

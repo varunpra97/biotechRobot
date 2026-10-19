@@ -1,5 +1,5 @@
 """FROZEN SNAPSHOT for vision_pipeline's Isaac validation capture -- copied
-from biotech-lab-robotics/sim/lab_scene.py so this work never reads from or
+from biotech-lab-robotics/sim/lab_scene.py (now simulation/sim/lab_scene.py) so this work never reads from or
 writes to that actively-developed repo. Only CAD_DIR/FRANKA_USD below were
 changed (now point at the assets/ copy alongside this file instead of
 biotech-lab-robotics/assets/); nothing else was touched. Do not edit this

@@ -1,7 +1,7 @@
 """Small shared geometry helpers (rotation conventions) used across the
 camera-pose and (later) object-pose stages, kept in one place so every
 stage agrees on the same (w, x, y, z) quaternion convention that
-`biotech-lab-robotics/sim/lab_scene.py` uses for USD orient ops.
+`biotech-lab-robotics/simulation/sim/lab_scene.py` uses for USD orient ops.
 """
 from __future__ import annotations
 

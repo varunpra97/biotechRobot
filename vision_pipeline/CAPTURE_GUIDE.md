@@ -54,7 +54,7 @@ on 3+ markers (`--min-markers`): 1-2 marker poses were 10-64 mm off.
 
 Pick the platform-frame origin: **center of the bench top surface**,
 Z up, meters (see `README.md`'s coordinate convention — this choice is
-what lets the output drop into `biotech-lab-robotics/sim` without
+what lets the output drop into `biotech-lab-robotics/simulation/sim` without
 re-expressing). Measure each marker's center and facing direction
 relative to that origin with a tape measure and level.
 
