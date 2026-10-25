@@ -314,6 +314,11 @@ lidded box) rest on the estimated solid fraction.
   (pipette) -- these still export visual-hull geometry (~1-2mm surface)
 - [ ] Tips in the tip rack as separate assets (same pattern as tubes)
 - [x] Depth path: TSDF fusion, sensor models, silhouette refinement on a depth start (see "Depth (RGB-D) path")
+- [x] Real-time localizer (`realtime/`): tracks every map object from the
+  wrist cameras and serves world coordinates and named targets (grasp
+  points, slot, bore and well openings) to the VLA + RL planner. Tested on
+  recorded episodes against the simulator's true poses; see
+  `realtime/README.md`
 - [~] One command (`scripts/run_pipeline.py`): poses, segmentation, depth fusion or hull, refinement, LLM, assets. Template fits are not yet chosen automatically from the LLM's shape family
 
 ## Layout
@@ -342,6 +347,7 @@ lidded box) rest on the estimated solid fraction.
 | `decompose.py` | Split a fused object into parts from a relation description (inserted / inside / on top) |
 | `depth_registration.py` | Depth ICP pose refinement anchored to the bench plane and marker quads |
 | `asset_export.py` | USD + OBJ assets: V-HACD colliders (<=64 verts/hull), mass, physics material |
+| `realtime/` | Live wrist-camera localizer of every map object for the planner (own README) |
 | `isaac_validation/` | End-to-end validation against the real Isaac Sim lab scene (isolated, see below) |
 | `config/` | Example marker layout + intrinsics files |
 | `scripts/` | CLI entry points, incl. the synthetic capture renderer/validator |
