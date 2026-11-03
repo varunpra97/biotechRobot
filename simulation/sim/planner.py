@@ -55,6 +55,9 @@ def pose_matrix(p):
     return T
 
 
+RENDER_FLUSH_UPDATES = 3        # app updates after a restore, so camera frames show the restored world
+
+
 @dataclass
 class Waypoint:
     phase: str
@@ -81,6 +84,13 @@ class Plan:
 
 
 class Planner:
+    # Rehearse held-object motions with the fingers at their measured
+    # positions (see plan()); False restores the old nominal-width behaviour.
+    hold_fingers_when_held = True
+    # After a rehearsal, hold a held object kinematic while the pads re-grip
+    # it (see _restore); False: it stays dynamic throughout.
+    held_regrip_kinematic = True
+
     def __init__(self, simulation_app, arm, task_objects):
         """task_objects: prim paths of rigid task objects (frozen while planning)."""
         from omni.physx import get_physx_scene_query_interface
@@ -182,8 +192,23 @@ class Planner:
         # A held object's contacts with the pads are re-created from scratch
         # after the teleports; let the pads re-grip it for a few updates with
         # its gravity still off, so it can't sag or get flicked meanwhile.
-        for _ in range(4 if held else 1):
+        # Those fresh pad contacts overlap it slightly, and PhysX pushes a new
+        # overlap apart at full speed in the first update: for a tube held
+        # off-centre (re-grasped from the tilted rotor bore) that kick spun it
+        # up to 17 deg / 4 mm in the grasp (measured). Held kinematic (put
+        # back first, while still dynamic: a true teleport) it can't be
+        # kicked; the force-limited pads settle against it instead.
+        regrip_kin = list(held) if self.held_regrip_kinematic else []
+        for p in regrip_kin:
+            lab_scene.set_kinematic(p, True)
+        # At least RENDER_FLUSH_UPDATES updates even with nothing held: the
+        # cameras render 2 updates behind physics, and after a single update
+        # the next recorded frame showed the arm at its last rehearsal pose
+        # (one teleported frame per planning call in recorded episodes).
+        for _ in range(max(4 if held else 1, RENDER_FLUSH_UPDATES)):
             self.app.update()
+        for p in regrip_kin:
+            lab_scene.set_kinematic(p, False)
         for p in held:
             lab_scene.zero_velocity(p)
             lab_scene.set_gravity(p, True)
@@ -197,6 +222,7 @@ class Planner:
         drive target afterwards)."""
         held = [held] if isinstance(held, str) else list(held or ())
         snap = self._snapshot(extra=held)
+        held_fingers = snap["q"][7:].copy() if held and self.hold_fingers_when_held else None
         q = snap["q"].copy()
         q_cmd = snap["q"] if q_cmd is None else q_cmd
         T_hand_held = {x: np.linalg.inv(self.kin.hand(snap["q"]))
@@ -212,7 +238,13 @@ class Planner:
                 path = []
                 for i in range(1, n + 1):
                     t = i / n
-                    q[7:] = wp.fingers
+                    # Holding something: rehearse with the fingers where they
+                    # really are. Rehearsing at the waypoint's nominal width
+                    # (7.4 mm for a tube the pads hold at 6.2 mm) made _restore
+                    # snap the pads shut on it in one step, and a tube held
+                    # off-centre (re-grasped from the tilted rotor bore) was
+                    # shoved 1-11 mm in the grasp, sometimes out of it.
+                    q[7:] = held_fingers if held_fingers is not None else wp.fingers
                     q, ok, _, pe, re = self.solve(prev_pos + t * (wp.pos - prev_pos),
                                                   slerp_R(prev_R, wp.R, t), q)
                     if not ok:

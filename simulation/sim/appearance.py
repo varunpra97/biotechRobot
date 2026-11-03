@@ -39,7 +39,7 @@ BASELINE = {
     "pipette": ((0.82, 0.84, 0.86), 0.35, 0.0, 1.0, 1.5),     # light grey ABS
     "tray": ((0.9, 0.92, 0.95), 0.15, 0.0, 0.55, 1.59),       # clear polystyrene plate
     "tip_rack": ((0.2, 0.42, 0.78), 0.4, 0.0, 1.0, 1.5),      # blue tip box
-    "tip": ((0.95, 0.95, 0.92), 0.3, 0.0, 0.6, 1.49),         # natural polypropylene
+    "tip": ((0.95, 0.95, 0.92), 0.3, 0.0, 0.8, 1.49),         # natural polypropylene (opacity 0.6 all but vanished on light walls)
     "waste_bin": ((0.45, 0.47, 0.5), 0.6, 0.0, 1.0, 1.5),
     "centrifuge": ((0.88, 0.88, 0.86), 0.4, 0.05, 1.0, 1.5),  # light grey housing
 }
@@ -60,6 +60,10 @@ TIP_RACKS = [((0.2, 0.42, 0.78), 1.0), ((0.12, 0.12, 0.13), 1.0), ((0.85, 0.88, 
 TRAYS = [((0.9, 0.92, 0.95), 0.55), ((0.95, 0.95, 0.95), 1.0), ((0.12, 0.12, 0.13), 1.0)]
 BINS = [(0.45, 0.47, 0.5), (0.9, 0.45, 0.1), (0.85, 0.85, 0.85), (0.2, 0.35, 0.7)]
 PIPETTES = [(0.82, 0.84, 0.86), (0.94, 0.94, 0.94), (0.35, 0.38, 0.42)]
+# pipette tips: natural polypropylene, and the yellow (200 uL) and blue
+# (1000 uL) colour codes; (rgb, opacity). A clear tip all but vanished in the
+# wrist_side view against light walls, so none is fully clear.
+TIPS = [((0.95, 0.95, 0.92), 0.9), ((0.98, 0.82, 0.15), 0.9), ((0.2, 0.45, 0.92), 0.9)]
 LIQUID_HUES = [(0.15, 0.35, 0.9), (0.15, 0.75, 0.25), (0.85, 0.15, 0.15), (0.9, 0.75, 0.1),
                (0.6, 0.2, 0.75), (0.95, 0.5, 0.1), (0.1, 0.7, 0.75)]
 
@@ -155,6 +159,8 @@ def apply(stage, rng=None):
         looks["tray"][0], looks["tray"][3] = _jitter(rng, rgb), op
         looks["waste_bin"][0] = _jitter(rng, rng.choice(BINS))
         looks["pipette"][0] = _jitter(rng, rng.choice(PIPETTES))
+        rgb, op = rng.choice(TIPS)
+        looks["tip"][0], looks["tip"][3] = rgb, op
         looks["centrifuge"][0] = _jitter(rng, BASELINE["centrifuge"][0])
     for name, (rgb, rough, metal, opacity, ior) in looks.items():
         mat = _material(stage, name, rgb, rough, metal, opacity, ior)
@@ -171,10 +177,13 @@ def apply(stage, rng=None):
             for tip in prim.GetChildren():
                 _bind(stage, str(tip.GetPath()), tip_mat)
     if rng is not None:
-        hues = rng.sample(LIQUID_HUES, k=min(len(LIQUID_HUES), len(lab_scene.LIQUIDS)))
-        for (name, L), rgb in zip(sorted(lab_scene.LIQUIDS.items()), hues):
-            if not name.startswith("tray/"):
-                L.set_color(tuple(_jitter(rng, rgb)))
+        # tube liquids only (the tray's wells start empty and take the colour
+        # of what is dispensed into them); zipping over all liquids gave the
+        # hues to the wells, which sort first, and no tube was ever recoloured
+        tubes = [(n, L) for n, L in sorted(lab_scene.LIQUIDS.items()) if not n.startswith("tray/")]
+        hues = rng.sample(LIQUID_HUES, k=min(len(LIQUID_HUES), len(tubes)))
+        for (name, L), rgb in zip(tubes, hues):
+            L.set_color(tuple(_jitter(rng, rgb)))
         chosen["liquids"] = {n: list(L.color) for n, L in lab_scene.LIQUIDS.items() if L.volume_ul > 0}
     chosen["lights"] = _lights(stage, rng)
     return chosen

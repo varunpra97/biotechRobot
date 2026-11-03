@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -37,12 +38,15 @@ APP_HZ = 60                    # one SimulationApp.update() = 1/60 s (measured)
 UPDATES_PER_STEP = APP_HZ // CONTROL_HZ
 ACTION_DIM = 10
 STATE_DIM = 10                 # 7 joints, gripper, plunger, tip attached
+JPEG_THREADS = 4               # EpisodeRecorder's background JPEG encoders
 EXTERIOR_CAMERA = "platform_cam1"   # fixed, whole platform: pi0.5's base image
-# The wrist image pi0.5 trains on, per primitive: the one of the three wrist
-# cameras (lab_scene.WRIST_CAMERAS) that shows that primitive best. All
-# three are recorded in every episode; the exporter sends this one. On the
-# real robot the controller must feed the same camera for the primitive it
-# is running.
+# What pi0.5 sees, in every episode: the exterior camera plus both wrist
+# cameras, in its three image slots (base, left wrist, right wrist). No
+# single wrist view shows every primitive well, and sending them all lets
+# one policy handle chained tasks; the real arm streams all three at once.
+POLICY_CAMERAS = (EXTERIOR_CAMERA, "wrist_top", "wrist_side")
+# The wrist camera that shows each primitive best -- metadata only now
+# (pi0.5 gets both wrist cameras).
 PRIMITIVE_WRIST_CAMERA = {
     "pick_tube_from_holder": "wrist_top", "insert_tube_into_bore": "wrist_top",
     "remove_tube_from_bore": "wrist_top", "place_tube_into_holder": "wrist_top",
@@ -50,8 +54,6 @@ PRIMITIVE_WRIST_CAMERA = {
     "dispense_into_well": "wrist_side", "dispense_into_tube": "wrist_side", "eject_tip": "wrist_side",
     "return_pipette": "wrist_side", "pick_up_tray": "wrist_top", "place_tray": "wrist_side",
 }
-# (wrist_high was the best view for none of them, compared side by side on
-# a full recorded chain; it is still recorded as extra context.)
 
 
 def droid_velocity_to_delta(a):
@@ -64,6 +66,24 @@ def droid_velocity_to_delta(a):
 
 def delta_to_droid_velocity(dq):
     return np.asarray(dq, float) / MAX_JOINT_DELTA
+
+
+def rgb_copy(rgba):
+    """A camera frame's RGB pixels as a private contiguous array. Replicator
+    hands out a view into a buffer it reuses for later frames; cvtColor
+    copies it (dropping alpha, same pixel values) ~20x faster than copying
+    the strided [..., :3] view."""
+    import cv2
+
+    if rgba.ndim == 3 and rgba.shape[-1] == 4 and rgba.dtype == np.uint8:
+        return cv2.cvtColor(rgba, cv2.COLOR_RGBA2RGB)
+    return np.array(rgba[..., :3])
+
+
+def _write_jpeg(img, path, quality):
+    from PIL import Image
+
+    Image.fromarray(img).save(path, quality=quality)
 
 
 def gripper_cmd_to_finger(g):
@@ -118,7 +138,7 @@ class LabEnv:
         obs["state"] = np.concatenate([obs["joint_position"], obs["gripper_position"],
                                        [pip["plunger"], pip["tip_attached"]]])
         if images:
-            obs["images"] = {n: self.cams[n][1].get_current_frame()["rgb"][..., :3]
+            obs["images"] = {n: rgb_copy(self.cams[n][1].get_current_frame()["rgb"])
                              for n in self.record_cameras}
         return obs
 
@@ -168,12 +188,13 @@ class LabEnv:
 
 class EpisodeRecorder:
     """Raw episode on disk: every recorded camera as JPEG frames at 15 Hz,
-    all states/actions in steps.npz, a 2-camera (exterior | policy wrist
-    camera) MP4 for viewing, and meta.json. export_lerobot.py turns these
-    into the LeRobot dataset π0.5 fine-tunes on: the exterior camera plus
-    `wrist_camera`, the wrist camera chosen for this primitive."""
+    all states/actions in steps.npz, an MP4 of the policy cameras side by
+    side (exterior | wrist_top | wrist_side) for viewing, and meta.json.
+    export_lerobot.py turns these into the LeRobot dataset π0.5 fine-tunes
+    on (POLICY_CAMERAS). `wrist_camera`, the wrist view that shows this
+    primitive best, is kept as metadata only."""
 
-    def __init__(self, out_dir, prompt, meta=None, jpeg_quality=95, wrist_camera="wrist_high"):
+    def __init__(self, out_dir, prompt, meta=None, jpeg_quality=95, wrist_camera=None):
         self.dir = Path(out_dir)
         shutil.rmtree(self.dir, ignore_errors=True)
         (self.dir / "images").mkdir(parents=True)
@@ -183,14 +204,23 @@ class EpisodeRecorder:
         self.rows = []
         self.video_frames = []
         self.wrist_camera = wrist_camera
-        self.policy_cameras = (EXTERIOR_CAMERA, wrist_camera)
+        self.policy_cameras = POLICY_CAMERAS
+        # JPEG encoding runs on worker threads (PIL releases the GIL while
+        # encoding) so it overlaps the next physics step; finish() waits for
+        # every file. Same encoder and quality, so the files are identical.
+        self._jpeg_pool = ThreadPoolExecutor(JPEG_THREADS)
+        self._jpeg_jobs = []
 
     def add(self, obs, action):
-        from PIL import Image
-
         t = len(self.rows)
+        # Bound the backlog (memory) to a few steps' worth of frames.
+        while len(self._jpeg_jobs) > 4 * max(1, len(obs["images"])):
+            self._jpeg_jobs.pop(0).result()
         for cam, img in obs["images"].items():
-            Image.fromarray(img).save(self.dir / "images" / f"{cam}_{t:05d}.jpg", quality=self.q)
+            if not img.flags.owndata:      # a view into someone's buffer: snapshot it now
+                img = np.array(img)
+            self._jpeg_jobs.append(self._jpeg_pool.submit(
+                _write_jpeg, img, self.dir / "images" / f"{cam}_{t:05d}.jpg", self.q))
         if all(c in obs["images"] for c in self.policy_cameras):
             self.video_frames.append(np.concatenate([obs["images"][c] for c in self.policy_cameras], axis=1))
         row = {k: obs[k] for k in ("joint_position", "joint_velocity", "gripper_position",
@@ -203,9 +233,16 @@ class EpisodeRecorder:
         row["action"] = np.asarray(action, float)
         self.rows.append(row)
 
+    def flush_images(self):
+        """Wait until every queued JPEG is on disk (re-raises a failed write)."""
+        while self._jpeg_jobs:
+            self._jpeg_jobs.pop(0).result()
+
     def finish(self, success, info=None):
         import cv2
 
+        self.flush_images()
+        self._jpeg_pool.shutdown()
         n = len(self.rows)
         names = sorted(self.rows[0]["object_poses"]) if n else []
         arr = lambda k: np.array([r[k] for r in self.rows])
@@ -224,7 +261,8 @@ class EpisodeRecorder:
             "prompt": self.prompt, "n_steps": n, "control_hz": CONTROL_HZ,
             "success": bool(success), "info": info or {},
             "object_names": names, "training_cameras": list(self.policy_cameras),
-            "policy_exterior_camera": EXTERIOR_CAMERA, "policy_wrist_camera": self.wrist_camera,
+            "policy_cameras": list(POLICY_CAMERAS), "policy_exterior_camera": EXTERIOR_CAMERA,
+            "best_wrist_camera": self.wrist_camera,
             "action_spec": {
                 "joint_velocity": "[0:7] DROID-normalized: joint delta per step = a * 0.2 rad",
                 "gripper": "[7] 0 = open (80 mm) .. 1 = closed, force-limited close",

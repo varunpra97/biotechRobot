@@ -215,9 +215,52 @@ TIP_COLLAR_Z = 0.052                # tip local z of the collar's underside (res
 TIP_LENGTH = 0.060
 TIP_MASS_KG = 0.001
 WASTE_BIN_XY = (0.49, 1.53)         # 90 x 90 x 70 mm open box
+# where the pipette is held nozzle-down, ready, beside the tip rack: offset
+# of the nozzle's xy from the rack's centre in the rack's frame
+# (pipette_expert; layout.py keeps the centrifuge out of its way)
+PIPETTE_READY_FROM_RACK = (-0.10, -0.01)
 PIPETTE_XY = (0.21, 1.58)           # nozzle end; lies along +y. 6 cm clear of the holder:
                                     # grasping across it puts the 21 cm-wide hand over its side
 PIPETTE_MASS_KG = 0.15              # electronic pipette
+# Per-episode layout variation (collect_primitives.py sets these before
+# build_platform): holder slots (row, col) left without a tube, and small
+# yaw jitter (deg) of the pipette (about its nozzle end) and the tray.
+EMPTY_HOLDER_SLOTS = set()
+PIPETTE_YAW_DEG = 0.0
+SAMPLE_TRAY_YAW_DEG = 0.0
+# ... and where the fixtures stand: offsets (m) of the tube holder and the
+# centrifuge from their default spots, and the centrifuge's rotation about
+# the vertical (deg). PIPETTE_XY, SAMPLE_TRAY_XY, TIP_RACK_XY and
+# WASTE_BIN_XY are set directly.
+HOLDER_OFFSET = (0.0, 0.0)
+CENTRIFUGE_OFFSET = (0.0, 0.0)
+CENTRIFUGE_YAW_DEG = 0.0
+# rotations (deg, about the vertical through each object's origin -- the
+# centre of the holder's and the tip rack's grids, the bin's centre)
+HOLDER_YAW_DEG = 0.0
+TIP_RACK_YAW_DEG = 0.0
+WASTE_BIN_YAW_DEG = 0.0
+
+
+def _turn(yaw_deg, dx, dy):
+    """(dx, dy) turned by yaw_deg about the vertical."""
+    a = np.radians(yaw_deg)
+    return dx * np.cos(a) - dy * np.sin(a), dx * np.sin(a) + dy * np.cos(a)
+
+
+def holder_slot_xy(r, c):
+    """World xy of holder slot (row r, column c), with the holder's offset
+    and rotation."""
+    hx, hy = holder_xy()
+    dx, dy = _turn(HOLDER_YAW_DEG, HOLDER_HOLE_X_MM[c] * MM_TO_M, HOLDER_HOLE_Y_MM[r] * MM_TO_M)
+    return float(hx + dx), float(hy + dy)
+
+
+def tip_xy(r, c):
+    """World xy of tip-rack position (row r, column c), with the rack's
+    rotation."""
+    dx, dy = _turn(TIP_RACK_YAW_DEG, (c - 4.5) * TIP_PITCH, (r - 4.5) * TIP_PITCH)
+    return float(TIP_RACK_XY[0] + dx), float(TIP_RACK_XY[1] + dy)
 # initial liquid (uL, RGB) in holder tubes; everything else starts empty
 # A 1000 uL tip's end can go at most ~36 mm below a 6 mm-bore tube's rim
 # before its widening body reaches the wall, so a tube can be aspirated from
@@ -550,7 +593,7 @@ def load_centrifuge(prim_path, pos, color=None, material="metal"):
     um.CreateFaceVertexIndicesAttr(body.faces.flatten().tolist())
     if color:
         um.CreateDisplayColorAttr([Gf.Vec3f(*color)])
-    set_prim_world_pose(prim_path, pos)
+    set_prim_world_pose(prim_path, pos, matrix_to_quat(centrifuge_rotation()))
 
     geom = GeomPrim(paths=prim_path, apply_collision_apis=True)
     UsdPhysics.MeshCollisionAPI(stage.GetPrimAtPath(prim_path))         .GetApproximationAttr().Set("none")
@@ -583,15 +626,42 @@ CENTRIFUGE_EXTENTS = (0.143, 0.197, 0.189)  # upright, after the 90 deg roll
 
 def holder_xy(cx=PLATFORM_CX, cy=PLATFORM_CY):
     """Tube holder origin (world XY). Left-of-center and toward the near
-    (arm-facing) edge so the nearest rows are within the arm's reach."""
-    return cx - 0.05, cy - 0.15
+    (arm-facing) edge so the nearest rows are within the arm's reach;
+    plus HOLDER_OFFSET."""
+    return cx - 0.05 + HOLDER_OFFSET[0], cy - 0.15 + HOLDER_OFFSET[1]
 
 
 def centrifuge_pos(cx=PLATFORM_CX, cy=PLATFORM_CY):
-    """Centrifuge mesh origin (world): left of the holder's edge
-    (holder_x - 0.158) with an 8cm gap, standing on the bench top."""
-    hx, hy = holder_xy(cx, cy)
-    return (hx - 0.158 - 0.08 - CENTRIFUGE_EXTENTS[0] / 2, hy, BENCH_Z + 0.04)
+    """Centrifuge mesh origin (world): by default left of the holder's edge
+    (holder_x - 0.158) with an 8cm gap, standing on the bench top; plus
+    CENTRIFUGE_OFFSET (independent of the holder's offset)."""
+    hx, hy = cx - 0.05, cy - 0.15
+    pos = np.array([hx - 0.158 - 0.08 - CENTRIFUGE_EXTENTS[0] / 2 + CENTRIFUGE_OFFSET[0], hy + CENTRIFUGE_OFFSET[1],
+                    BENCH_Z + 0.04])
+    if CENTRIFUGE_YAW_DEG:          # turn about the footprint's centre, not the mesh origin
+        c = _centrifuge_center_local()
+        pos += c - centrifuge_rotation() @ c
+    return tuple(float(v) for v in pos)
+
+
+_CENTRIFUGE_CENTER = None
+
+
+def _centrifuge_center_local():
+    """Centre of the centrifuge's footprint in its local frame (z = 0)."""
+    global _CENTRIFUGE_CENTER
+    if _CENTRIFUGE_CENTER is None:
+        v = np.concatenate([p.vertices for i, p in enumerate(centrifuge_parts_local())
+                            if i not in CENTRIFUGE_LID_PARTS])
+        _CENTRIFUGE_CENTER = np.array([(v[:, 0].min() + v[:, 0].max()) / 2, (v[:, 1].min() + v[:, 1].max()) / 2, 0.0])
+    return _CENTRIFUGE_CENTER
+
+
+def centrifuge_rotation():
+    """The centrifuge's rotation about the vertical (CENTRIFUGE_YAW_DEG):
+    world = R @ local + centrifuge_pos()."""
+    a = np.radians(CENTRIFUGE_YAW_DEG)
+    return np.array([[np.cos(a), -np.sin(a), 0.0], [np.sin(a), np.cos(a), 0.0], [0.0, 0.0, 1.0]])
 
 
 def build_platform(cx, cy, rigid_objects=()):
@@ -621,17 +691,18 @@ def build_platform(cx, cy, rigid_objects=()):
     # ---- tube holder (real 5x4-bore rack) + 20 real hollow test tubes ----
     holder_x, holder_y = holder_xy(cx, cy)
     holder_path = f"{root}/TubeHolder"
-    load_mesh_prim(holder_path, TUBE_HOLDER_OBJ, (holder_x, holder_y, pz),
+    load_mesh_prim(holder_path, TUBE_HOLDER_OBJ, (holder_x, holder_y, pz), yaw_deg=HOLDER_YAW_DEG,
                    color=(0.85, 0.85, 0.85), material="plastic", approximation="none")
 
     # Each tube stands on its bore's floor (tube local z=0 is its tip).
     tube_z = pz + HOLDER_BORE_FLOOR_MM * MM_TO_M
-    for r, y_mm in enumerate(HOLDER_HOLE_Y_MM):
-        for c, x_mm in enumerate(HOLDER_HOLE_X_MM):
-            tx = holder_x + x_mm * MM_TO_M
-            ty = holder_y + y_mm * MM_TO_M
+    for r in range(len(HOLDER_HOLE_Y_MM)):
+        for c in range(len(HOLDER_HOLE_X_MM)):
+            tx, ty = holder_slot_xy(r, c)
             name = f"tube_r{r}_c{c}"
             path = f"{root}/Tube_r{r}_c{c}"
+            if (r, c) in EMPTY_HOLDER_SLOTS:
+                continue
             _, tube_extents = load_mesh_prim(path, TEST_TUBE_OBJ, (tx, ty, tube_z),
                                              color=(0.75, 0.9, 0.95), material="glass",
                                              approximation="convexHull",
@@ -645,7 +716,7 @@ def build_platform(cx, cy, rigid_objects=()):
     # starts lifted by that much. One pipette: an earlier layout had two
     # overlapping each other, harmless only while they were static meshes.
     path = f"{root}/Pipette0"
-    load_mesh_prim(path, PIPETTE_OBJ, (PIPETTE_XY[0], PIPETTE_XY[1], pz + 0.041),
+    load_mesh_prim(path, PIPETTE_OBJ, (PIPETTE_XY[0], PIPETTE_XY[1], pz + 0.041), yaw_deg=PIPETTE_YAW_DEG,
                    color=(0.45, 0.5, 0.55), material="plastic", approximation="convexHull",
                    collision_obj=PIPETTE_COLLISION_OBJ)
     if "pipette_0" in rigid_objects:
@@ -654,7 +725,7 @@ def build_platform(cx, cy, rigid_objects=()):
 
     # ---- 10-well sample tray (5 x 2), narrow enough to grip across ----
     tray_path = f"{root}/SampleTray"
-    _, tray_ext = load_mesh_prim(tray_path, SAMPLE_TRAY_OBJ, (*SAMPLE_TRAY_XY, pz),
+    _, tray_ext = load_mesh_prim(tray_path, SAMPLE_TRAY_OBJ, (*SAMPLE_TRAY_XY, pz), yaw_deg=SAMPLE_TRAY_YAW_DEG,
                                  color=(0.6, 0.6, 0.9), material="plastic",
                                  approximation="convexHull", collision_obj=SAMPLE_TRAY_COLLISION_OBJ)
     if "tray" in rigid_objects:
@@ -663,17 +734,17 @@ def build_platform(cx, cy, rigid_objects=()):
 
     # ---- 100-tip rack, tips hanging by their collars, and a waste bin ----
     rx, ry = TIP_RACK_XY
-    load_mesh_prim(f"{root}/TipRack", TIP_RACK_OBJ, (rx, ry, pz), color=(0.25, 0.45, 0.8),
+    load_mesh_prim(f"{root}/TipRack", TIP_RACK_OBJ, (rx, ry, pz), yaw_deg=TIP_RACK_YAW_DEG, color=(0.25, 0.45, 0.8),
                    material="plastic", approximation="none")
-    load_mesh_prim(f"{root}/WasteBin", WASTE_BIN_OBJ, (*WASTE_BIN_XY, pz), color=(0.5, 0.52, 0.55),
-                   material="plastic", approximation="none")
+    load_mesh_prim(f"{root}/WasteBin", WASTE_BIN_OBJ, (*WASTE_BIN_XY, pz), yaw_deg=WASTE_BIN_YAW_DEG,
+                   color=(0.5, 0.52, 0.55), material="plastic", approximation="none")
     tip_z = pz + TIP_RACK_HEIGHT - TIP_COLLAR_Z
     tube_paths = [o["path"] for n, o in objects.items() if n.startswith("tube_")]
     for r in range(10):
         for c in range(10):
             name = f"tip_{'ABCDEFGHIJ'[r]}{c + 1}"
             path = f"{root}/Tips/{name}"
-            load_mesh_prim(path, TIP_OBJ, (rx + (c - 4.5) * TIP_PITCH, ry + (r - 4.5) * TIP_PITCH, tip_z),
+            load_mesh_prim(path, TIP_OBJ, (*tip_xy(r, c), tip_z), yaw_deg=TIP_RACK_YAW_DEG,
                            color=(0.93, 0.93, 0.9), material="plastic", approximation="convexHull",
                            collision_obj=TIP_COLLISION_OBJ)
             make_rigid_body(path, TIP_MASS_KG, kinematic=True, report_contacts=False)
@@ -746,6 +817,10 @@ FINGER_JOINT_PATHS = (LEFT_FINGER_PATH + "/finger_joint1", RIGHT_FINGER_PATH + "
 # to 0.001 mm -- probe_grasp_jitter.py), and a 4 N cap let the 150 g pipette
 # pivot between the pads when the wrist turned it nozzle-down.
 FINGER_MAX_FORCE = 30.0     # N per finger
+# The asset's own finger colliders -- five small boxes per finger, just behind
+# the visible pad face -- stay on alongside the pad mesh unless this is False
+# (configure_franka_physics).
+FINGER_HIDDEN_BOXES = True
 FINGER_STIFFNESS = 2.3e3    # N/m toward fully closed
 FINGER_DAMPING = 60.0       # N*s/m (same damping ratio as the earlier 1000 N/m, 40 N*s/m)
 GRIPPER_STROKE = 0.04       # m per finger
@@ -775,6 +850,11 @@ def configure_franka_physics(gravity_compensation=True):
         stage.GetPrimAtPath(finger + "/finger_1").SetInstanceable(False)
         pad = finger + "/finger_1/finger_1"
         UsdPhysics.CollisionAPI(stage.GetPrimAtPath(pad)).GetCollisionEnabledAttr().Set(True)
+        if not FINGER_HIDDEN_BOXES:
+            for box in ("Box", "Box_1", "Box_2", "Box_3", "Box_4"):
+                prim = stage.GetPrimAtPath(f"{finger}/{box}")
+                if prim.IsValid() and prim.HasAPI(UsdPhysics.CollisionAPI):
+                    UsdPhysics.CollisionAPI(prim).GetCollisionEnabledAttr().Set(False)
     PhysxSchema.PhysxArticulationAPI.Apply(stage.GetPrimAtPath("/World/Arm/Geometry/link0")) \
         .CreateSolverPositionIterationCountAttr(ARM_SOLVER_POSITION_ITERATIONS)
     for jp in FINGER_JOINT_PATHS:
@@ -839,11 +919,17 @@ def define_physics_scene(path="/PhysicsScene", steps_per_second=60, gpu=True):
     return path
 
 
-def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=PHYSICS_HZ):
+def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=PHYSICS_HZ,
+                all_cameras=False):
     """Build room + platform + arm + cameras; settle the arm into its home
     pose. Returns (arm: Articulation, cams: {name: (prim_path, Camera)},
     objects: {name: {"path": prim_path, "size": (w, d, h)}}).
     rigid_objects: see build_platform.
+    all_cameras: also build the four views no policy uses (arm_cam0/1,
+    platform_cam0, top) -- for viewing and debugging only. Every camera
+    renders on every app update and rendering is most of a data step, so
+    data generation builds just the policy's three: platform_cam1 and the
+    two wrist cameras.
 
     Shared by lab_scene.py's own CLI (viewing/capture) and sim/collect_data.py
     (data generation), so both always build the exact same scene.
@@ -919,7 +1005,7 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
 
     cams = {}
     # 2 behind the robot arm: arm + tube platform both in view
-    for j, sx in enumerate((-1.3, 1.3)):
+    for j, sx in enumerate((-1.3, 1.3) if all_cameras else ()):
         eye = (ARM_POS[0] + sx, ARM_POS[1] - 1.4, 1.7)
         target = (PLATFORM_CX, PLATFORM_CY, BENCH_Z + 0.2)
         cams[f"arm_cam{j}"] = aim(f"arm_cam{j}", eye, target, (640, 480))
@@ -931,13 +1017,15 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
     # tube ~1 px once resized to the model's 224x224 input).
     eye = (PLATFORM_CX - 1.0, PLATFORM_CY + PLATFORM_D / 2 + 0.6, BENCH_Z + 0.9)
     target = (ARM_POS[0], ARM_POS[1], ARM_POS[2] + 0.3)
-    cams["platform_cam0"] = aim("platform_cam0", eye, target, (640, 480), focal_length=18.0)
+    if all_cameras:
+        cams["platform_cam0"] = aim("platform_cam0", eye, target, (640, 480), focal_length=18.0)
     cams["platform_cam1"] = aim("platform_cam1", EXTERIOR_CAM_EYE, EXTERIOR_CAM_TARGET,
                                 (640, 480), focal_length=EXTERIOR_CAM_FOCAL)
     # 1 straight overhead top-down view of the whole platform.
     top_eye = (PLATFORM_CX, PLATFORM_CY, BENCH_Z + 1.6)
     top_target = (PLATFORM_CX, PLATFORM_CY, BENCH_Z)
-    cams["top"] = aim("top", top_eye, top_target, (640, 480), focal_length=20.0)
+    if all_cameras:
+        cams["top"] = aim("top", top_eye, top_target, (640, 480), focal_length=20.0)
 
     # 1 real eye-in-hand camera: a Camera prim parented directly under the
     # hand link (not a free-floating prim with a position computed once),
@@ -953,9 +1041,8 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
     # transforming the finger links' world position into the hand's local
     # frame (pure +Z offset, no X/Y component).
     #
-    # Three of them (WRIST_CAMERAS): no single wrist view showed every
-    # primitive well, so each primitive's episodes train on the best one
-    # (PRIMITIVE_WRIST_CAMERA in lab_env.py).
+    # Two of them (WRIST_CAMERAS): no single wrist view showed every
+    # primitive well, so pi0.5 gets both (lab_env.POLICY_CAMERAS).
     for name, cfg in WRIST_CAMERAS.items():
         cams[name] = add_hand_camera(f"{HAND_PATH}/{name}", cfg["eye"], cfg["target"], cfg["focal"],
                                      right=cfg["right"])
@@ -963,9 +1050,9 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
     return arm, cams, objects
 
 
-# Wrist cameras: three small 25 x 25 x 20 mm modules on aluminium brackets
+# Wrist cameras: two small 25 x 25 x 20 mm modules on aluminium brackets
 # bolted to the hand (cad_source/make_wrist_camera_mount.py builds them and
-# checks that no bracket shows up in any of the three views). Hand frame:
+# checks that no bracket shows up in either view). Hand frame:
 # z = approach (fingertips at z = 0.1123), y = finger closing axis,
 # x = y x z; the hand body spans x +-18 mm (side faces, z 15-60 mm),
 # y -104..+100 mm, z up to 66 mm; the fingers stay within x +-10.5 mm,
@@ -973,28 +1060,26 @@ def build_scene(simulation_app, rigid_objects=(), gpu_physics=True, physics_hz=P
 # +x), and tilts 0-18 deg in the grasp.
 #
 # No single view showed every primitive well (studied with the user,
-# 2026-10-18), so there are three, and each primitive trains on its best:
+# 2026-10-18), so there are two, and pi0.5 gets both in every episode,
+# with the exterior camera (lab_env.POLICY_CAMERAS):
 #  - wrist_top: right beside the fingers on +x, looking straight down the
 #    approach axis -- the grip, the held tube (into its open top), the
-#    holder slot or centrifuge bore right below it. Tube primitives.
+#    holder slot or centrifuge bore right below it, the tray from above.
 #  - wrist_side: on the nozzle side (-x) at fingertip level, out along +y --
 #    the grip on the pipette body, the whole pipette, its tip and the tube /
-#    well / rack the tip works in. Pipette primitives.
-#  - wrist_high: above the gripper on the head side, biased 12 cm along +y,
-#    level with the hand's bottom -- the whole held object and its
-#    surroundings from a step back (tray, bench spots, transits).
-# Plates: wrist_top on the +x side face; wrist_side and wrist_high share a
-# plate on the top (wrist-side) face. Image right per `right` (None: image
-# up toward the wrist, as on DROID's wrist camera).
+#    well / rack the tip works in.
+# (A third, wrist_high -- above the gripper, biased 12 cm along +y -- was
+# the best view for no primitive and was removed with its bracket.)
+# Plates: wrist_top on the +x side face, wrist_side on the top (wrist-side)
+# face. Image right per `right` (None: image up toward the wrist, as on
+# DROID's wrist camera).
 WRIST_CAMERAS = {
     "wrist_top": dict(eye=(0.045, 0.0, 0.035), target=(0.0, 0.0, 0.14), right=None, focal=9.0,
                       plate="side_x"),
     "wrist_side": dict(eye=(-0.065, 0.110, 0.060), target=(-0.0597, -0.0338, 0.1023), right=(1.0, 0.0, 0.0),
                        focal=8.0, plate="top"),
-    "wrist_high": dict(eye=(0.090, 0.120, 0.078), target=(-0.0087, 0.0177, 0.1257),
-                       right=(0.753, -0.597, 0.278), focal=10.0, plate="top"),
 }
-WRIST_CAM_MOUNT_OBJ = f"{CAD_DIR}/wrist_camera_mount.obj"                    # visual, all three
+WRIST_CAM_MOUNT_OBJ = f"{CAD_DIR}/wrist_camera_mount.obj"                    # visual, both
 WRIST_CAM_MOUNT_COLLISION_OBJ = f"{CAD_DIR}/wrist_camera_mount_collision.obj"  # convex pieces
 
 
@@ -1082,7 +1167,7 @@ def main():
 
     from pxr import Sdf
 
-    arm, cams, objects = build_scene(simulation_app)
+    arm, cams, objects = build_scene(simulation_app, all_cameras=True)
     print(f"scene ready: 1 platform, 1 arm (static), {len(cams)} cameras")
 
     out_dir = Path(args.out)

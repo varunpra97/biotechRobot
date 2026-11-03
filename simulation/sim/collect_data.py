@@ -108,7 +108,7 @@ def main():
 
     from PIL import Image
 
-    arm, cams, objects = lab_scene.build_scene(simulation_app)
+    arm, cams, objects = lab_scene.build_scene(simulation_app, all_cameras=True)
     cam_names = sorted(cams.keys())
     obj_names = sorted(objects.keys())
 

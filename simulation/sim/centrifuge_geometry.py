@@ -76,12 +76,13 @@ def rotor_bores():
     """All six bores, keyed by sleeve part index."""
     parts = lab_scene.centrifuge_parts_local()
     pos = np.array(lab_scene.centrifuge_pos())
-    hub = parts[lab_scene.CENTRIFUGE_HUB_PART].vertices + pos
+    R = lab_scene.centrifuge_rotation()
+    hub = parts[lab_scene.CENTRIFUGE_HUB_PART].vertices @ R.T + pos
     hub_center = hub.mean(0)
     hub_top = hub[:, 2].max()
     out = {}
     for idx in lab_scene.CENTRIFUGE_SLEEVE_PARTS:
-        c, a = _fit_axis(parts[idx].vertices + pos)
+        c, a = _fit_axis(parts[idx].vertices @ R.T + pos)
         out[idx] = Bore(idx, c, a, float((hub_top - c[2]) / a[2]), hub_center)
     return out
 
@@ -95,5 +96,5 @@ def body_mesh_world():
     body = trimesh.util.concatenate([p for i, p in enumerate(parts)
                                      if i not in lab_scene.CENTRIFUGE_LID_PARTS
                                      and len(p.faces) > 4])
-    return trimesh.Trimesh(body.vertices + np.array(lab_scene.centrifuge_pos()),
+    return trimesh.Trimesh(body.vertices @ lab_scene.centrifuge_rotation().T + np.array(lab_scene.centrifuge_pos()),
                            body.faces, process=True)

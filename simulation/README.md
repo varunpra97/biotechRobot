@@ -27,26 +27,27 @@ accuracy of what the cameras see is the main requirement.
   - centrifuge, lid off, with a fixed-angle rotor: six 8.0mm bores tilted
     ~45° from vertical, conical floors
 - **Arm**: Franka Panda, fixed base, on a pedestal level with the bench.
-- **Cameras** (8):
-  - `arm_cam0`, `arm_cam1` — behind the arm, arm + bench in view
-  - `platform_cam0`, `platform_cam1` — behind the bench, looking back at the
-    arm; `platform_cam1` is wide enough to see the whole platform and is the
-    policy's fixed exterior camera
-  - `top` — straight down over the bench
-  - three wrist cameras, small 25mm modules on aluminium brackets bolted
+- **Cameras**: data generation renders only the three π0.5 uses —
+  `platform_cam1` and the two wrist cameras below. Rendering is most of a
+  recorded step, so the other four (`arm_cam0`, `arm_cam1` behind the arm,
+  `platform_cam0`, `top` overhead) exist only for viewing and debugging
+  (`build_scene(..., all_cameras=True)`, used by `lab_scene.py` and
+  `view_motion.py`).
+  - `platform_cam1` — behind the bench, looking back at the arm, wide
+    enough to see the whole platform: the policy's fixed exterior camera
+  - two wrist cameras, small 25mm modules on aluminium brackets bolted
     to the hand (part of the hand link: they move and collide with the
     gripper, and the planner checks them; `sim/lab_scene.py`
     `WRIST_CAMERAS`, brackets from `../../cad_source/make_wrist_camera_mount.py`).
     No single wrist view showed every primitive well, so:
     - `wrist_top` — beside the fingers looking straight down the approach
       axis: the grip, into the held tube, the holder slot or centrifuge
-      bore right below
+      bore right below, the tray from above
     - `wrist_side` — nozzle side at fingertip level: the grip on the
       pipette, the whole pipette, the tip and what it works in
-    - `wrist_high` — above the gripper on the head side, biased sideways:
-      the whole held object and its surroundings (tray, bench spots)
-    All three are recorded; each primitive's episodes train π0.5 on the
-    one that shows it best (`sim/lab_env.py` `PRIMITIVE_WRIST_CAMERA`)
+    π0.5 gets both, with `platform_cam1`, in every episode
+    (`sim/lab_env.py` `POLICY_CAMERAS`). A third wrist camera, `wrist_high`,
+    was the best view for no primitive and was removed with its bracket.
 
 ## Physical accuracy
 
@@ -82,9 +83,21 @@ Each of these was checked against the simulator, not assumed:
 
 ## Primitives (15 Hz, π0.5 format)
 
-`sim/collect_primitives.py` runs every lab primitive as one physical chain
-(the tube really is in the centrifuge when "remove" starts) and records each
-primitive as its own episode with its own varied prompt (`sim/prompts.py`):
+`sim/collect_primitives.py` generates many varied episodes. Each *chain*
+is a fresh Isaac process with a seeded layout and a seeded look
+(`sim/appearance.py`). The layout (`sim/layout.py`) places every object
+anywhere on the reachable part of the platform, in a random arrangement,
+and moves the arm's base; the holder, tip rack, pipette and tray keep their
+orientation relative to the arm (plus jitter), the centrifuge and bin turn
+freely. It also seeds the empty holder slots and which tubes hold liquid
+and how much. A chain runs one block (tubes, pipette or tray) as one
+physical sequence (the tube really is in the centrifuge when "remove"
+starts), with seeded slots, bores, tips, volumes, wells/tubes and tray spots
+("to the left of the tip box"), and records each primitive as its own episode
+with its own varied prompt (`sim/prompts.py`). About 10-20% of episodes are
+*chained*: one prompt over a sequence, e.g. "transfer 150 uL from tube B1
+to well A3" (`transfer_to_well`, `transfer_to_tube`,
+`load_tube_into_centrifuge`, `unload_tube_to_holder`, `move_tray`).
 
 | Group | Primitives |
 |---|---|
@@ -93,7 +106,9 @@ primitive as its own episode with its own varied prompt (`sim/prompts.py`):
 | Sample tray | `pick_up_tray`, `place_tray` |
 
 Each primitive checks its physical outcome (seat depth, tilt, volumes moved,
-tip in the bin, nothing else disturbed) and the chain stops at a failure.
+tip in the bin, nothing else disturbed); only successful episodes count.
+A failed one goes to `_failed/` and ends its chain, and the next chain
+starts fresh. Re-running the same command resumes after a crash.
 
 Control follows DROID, which π0.5 was trained on: 15 Hz joint-velocity
 actions normalized to [-1, 1] (x 0.2 rad per step), plus gripper position
@@ -101,22 +116,25 @@ actions normalized to [-1, 1] (x 0.2 rad per step), plus gripper position
 fraction and tip eject. Action is 10-D; state is 10-D (7 joints, gripper,
 plunger, tip attached).
 
-Output in `data/primitives/<primitive>/ep_XXXX/`:
+Output in `data/primitives_v2/<primitive or chained name>/ep_<chain>_<k>/`
+(plus `summary.json` with running totals and episodes per GPU hour,
+`chains/`, `logs/`, `reach_survey.json`):
 
-- `images/<camera>_<step>.jpg` — all eight cameras, every step
+- `images/<camera>_<step>.jpg` — the three policy cameras, every step
 - `steps.npz` — joint positions and velocities, commanded joints, gripper,
   TCP and hand poses, all object poses, pipette state, actions, states
-- `exterior_wrist.mp4` — the two policy cameras side by side
+- `exterior_wrist.mp4` — the three policy cameras side by side
 - `meta.json` — prompt, success, outcome measurements, action/state spec
 
 ## π0.5 fine-tuning data
 
 `training/export_lerobot.py` converts successful episodes into a LeRobot
 dataset with openpi's DROID layout: `exterior_image_1_left` (platform_cam1),
-`wrist_image_left` (the episode's wrist camera, chosen per primitive), `joint_position`, `gripper_position`, `pipette_state`,
-10-D `actions`, and the prompt as the task. Only those two cameras go to
-the policy; the rest stay in the raw episodes. On the real robot the
-controller has to feed the same wrist camera for the primitive it runs.
+`wrist_image_left` (wrist_top), `wrist_image_right` (wrist_side),
+`joint_position`, `gripper_position`, `pipette_state`, 10-D `actions`, and
+the prompt as the task. Those three cameras fill π0.5's three image slots
+(base, left wrist, right wrist) in every episode; the rest stay in the raw
+episodes. On the real robot all three stream at once.
 
 `training/pi05_lab.py` is the matching openpi train config for the RTX 3080
 Ti: LoRA on `pi05_droid`, vision encoder frozen, batch 8. It reuses DROID's
@@ -161,13 +179,14 @@ Output in `data/episodes/ep_XXXX/`:
 |---|---|
 | `sim/lab_scene.py` | Builds the scene (shared by every script); GUI viewer + capture tool |
 | `sim/collect_primitives.py` | Records every primitive as a 15 Hz episode (above) |
+| `sim/layout.py` | Randomized platform layouts (object placement, arm base, tray spots) |
 | `sim/lab_env.py` | 15 Hz DROID-style env: action integration, observations, episode recorder |
 | `sim/expert.py`, `sim/pipette_expert.py` | Scripted primitives (tubes and tray; pipette) |
 | `sim/planner.py`, `sim/franka_kinematics.py` | Collision-checked path planning; analytic Franka kinematics and IK |
 | `sim/pipette.py`, `sim/liquids.py` | Electronic pipette model (tips, plunger, liquid transfer); liquid volumes |
 | `sim/prompts.py` | Prompt templates per primitive |
 | `sim/appearance.py` | Materials, lab lighting and seeded appearance randomization |
-| `sim/view_episodes.py` | Plays recorded episodes from the two policy cameras |
+| `sim/view_episodes.py` | Plays recorded episodes from the three policy cameras |
 | `training/export_lerobot.py`, `training/pi05_lab.py` | LeRobot export; openpi LoRA fine-tune config |
 | `sim/collect_data_pickplace.py` | Earlier single pick-and-place episode (keyframes) |
 | `sim/collect_data.py` | Earlier task: approach and hover over a tube top (position-only IK, coarse collision check) |
@@ -198,15 +217,15 @@ The measurement and probe scripts behind the numbers above are in
 From `C:\Users\varun\workspace\BiotechRobot`, with the Isaac venv's Python:
 
 ```powershell
-# Record every primitive as a 15 Hz episode (headless, ~35 min);
-# --only tubes|pipette|tray runs one group
-.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\collect_primitives.py --out data\primitives
+# Generate N valid 15 Hz episodes (headless; one Isaac process per chain,
+# waits while another session's GPU job runs; re-run to resume)
+.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\collect_primitives.py --episodes 3500 --seed 0
 
-# Watch them from the two policy cameras (space pause, n next, q quit)
-.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives
-.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives --primitive attach_tip
+# Watch them from the three policy cameras (space pause, n next, q quit)
+.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives_v2
+.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives_v2 --primitive attach_tip
 # ... or write them all to one captioned MP4
-.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives --save data\primitives\all_primitives.mp4
+.venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\view_episodes.py data\primitives_v2 --save data\primitives_v2\all_episodes.mp4
 
 # Generate the earlier pick-and-place episode (headless, ~3 min)
 .venv-isaac\Scripts\python.exe biotech-lab-robotics\simulation\sim\collect_data_pickplace.py --out data\episodes
@@ -234,7 +253,7 @@ sets playback speed (default 3; higher is slower).
 
 ## Status (2026-10-18)
 
-- [x] Lab scene with real CAD labware, 8 cameras (incl. three bracket-mounted wrist cameras)
+- [x] Lab scene with real CAD labware, 3 recorded cameras (exterior + two bracket-mounted wrist cameras; 4 more for viewing)
 - [x] Labware sized to fit together: tube ↔ holder ↔ centrifuge rotor bore;
   tray narrow enough to grip; tips that press-fit onto the pipette nozzle
 - [x] Friction-based grasping (no rigid attach)

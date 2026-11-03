@@ -35,9 +35,45 @@ LIFT_CLEARANCE = 0.03
 RELEASE_TIP_S = -0.014        # tube tip along the bore axis at release (seat ~ -15.75 mm)
 INSERT_STROKE = 0.040
 TRANSIT_RAISE = 0.08
+# Held tube at pre-insert (tip 10 mm above the bore opening), checked before
+# inserting: re-aimed until its tip is within the TOL values of the bore's
+# axis (sideways -- how far along the axis it is doesn't matter, the insert
+# moves along it) and its axis within the TOL angle; if still beyond the MAX
+# values after the re-aims, not inserted. The bore leaves 0.5 mm radial
+# clearance; a tube 4.4 deg off jammed. Measured once a swing in the grasp
+# has died out (re-aims chasing a swinging tube made it worse: 0.6 -> 3.3 mm).
+PRE_INSERT_AXIS_TOL_DEG = 1.0
+PRE_INSERT_POS_TOL = 0.0006
+PRE_INSERT_AXIS_MAX_DEG = 2.0
+PRE_INSERT_POS_MAX = 0.001
+PICK_MARGIN = 0.25               # rad from the joint limits for a holder pick's grasp axis (pick_frame)
+PRE_INSERT_TRIES = 6             # measurements (so up to 5 re-aims)
+PRE_INSERT_SETTLE_STEPS = 10
+SEAT_REST_TRIES = 4              # seat_check: re-measure "at rest" this often, 5 steps apart
+RETRACT_MOVE_MAX = 0.0005        # insert: a still-seated tube may have settled this much during the retract
+# Held tube above a holder slot (tip LIFT_CLEARANCE above the rack), checked
+# before lowering into the 8 mm bore (0.5 mm radial clearance; the conical tip,
+# 0.5 mm radius at its point, guides an offset tube in -- placed tubes rest up
+# to ~0.8 mm off centre): re-aimed until within the TOL values, not lowered if
+# still beyond the MAX values. A tube re-grasped from the rotor can swing in
+# the grasp after a move, so it is measured only once that has died out
+# (measured mid-swing, re-aims chased it: 0.6 -> 2.7 mm).
+PLACE_ALIGN_TILT_TOL_DEG = 1.0
+PLACE_ALIGN_XY_TOL = 0.0003
+PLACE_ALIGN_TILT_MAX_DEG = 2.0
+PLACE_ALIGN_XY_MAX = 0.0008
+PLACE_ALIGN_TRIES = 4
+PLACE_ALIGN_SETTLE_STEPS = 10
 PLACE_TIP_GAP = 0.002         # tube tip above the holder bore floor at release
 
 FAST, SLOW, INSERT = 0.15, 0.04, 0.02   # m/s TCP speeds
+# Carry to a holder slot. A tube re-grasped from the rotor (remove_tube_from_bore)
+# sits tilted across the pads; at FAST it fell out on the way.
+PLACE_CARRY_SPEED = SLOW
+# Carry to a rotor bore: with the holder and the centrifuge anywhere on the
+# bench (layout.py) carries got long, and at FAST a tube arrived 3.9 deg /
+# 3.8 mm off in the grasp -- more than the pre-insert re-aims recovered
+INSERT_CARRY_SPEED, INSERT_CARRY_ANG_SPEED = 0.08, 0.4
 Z_DOWN = np.array([0.0, 0.0, -1.0])
 # Moving a tube along an 8 mm bore with 0.5 mm clearance, it may touch (slide
 # along) the bore wall; an overlap query reports that touch as a hit, so
@@ -73,6 +109,42 @@ class Expert:
         # (validated in the original pick-place collector).
         y = np.cross(self.bores[8].axis, [0, 0, 1.0])
         self.closing_y = -y / np.linalg.norm(y)
+        self._bore_closing = {}
+
+    def closing_for_bore(self, bore_idx):
+        """Closing axis for work at one rotor bore: horizontal and tangential
+        to the rotor at that bore, so tilting the tube into it is a pure
+        rotation about the closing axis -- for every bore, not just the one
+        a fixed axis was chosen for (with bore 8's axis the hand reached the
+        other bores twisted and hit the rotor, or ran out of joint range).
+        Of the two signs, the one with more joint-limit margin over the
+        insert and the removal grasp (pure-math IK, nothing moves)."""
+        if bore_idx not in self._bore_closing:
+            b = self.bores[bore_idx]
+            y = np.cross(b.axis, [0, 0, 1.0])
+            y /= np.linalg.norm(y)
+            L = 0.058
+            pts = [b.at(RELEASE_TIP_S) + (L - GRASP_DEPTH) * b.axis,
+                   b.at(RELEASE_TIP_S + INSERT_STROKE) + (L - GRASP_DEPTH) * b.axis,
+                   b.at(-0.0158) + (L - REMOVE_GRASP_DEPTH) * b.axis]
+            pts.append(pts[1] + [0, 0, TRANSIT_RAISE])
+            best = (-np.inf, -y)
+            for cand in (-y, y):
+                R = frame_from_axis(-b.axis, cand)
+                m = np.inf
+                for p in pts:
+                    q, ok, *_ = self.pl.kin.ik(p, R, self.env.q_cmd)
+                    m = min(m, self.pl.limit_margin(q) if ok else -1.0)
+                if m > best[0]:
+                    best = (m, cand)
+            self._bore_closing[bore_idx] = (best[1], float(best[0]))
+        return self._bore_closing[bore_idx][0]
+
+    def bore_margin(self, bore_idx):
+        """Joint-limit margin (rad) of that bore's insert and removal poses
+        with its closing axis; < 0: some pose has no IK solution."""
+        self.closing_for_bore(bore_idx)
+        return self._bore_closing[bore_idx][1]
 
     # ------------------------------------------------------------ execution
     def execute(self, plan, pipette=None):
@@ -111,6 +183,15 @@ class Expert:
                 return Result(False, {"planning_error": plan.error})
             if not (held and callable(waypoints) and plan.held_shift_m > 1e-3):
                 break
+        else:
+            # Still shifting after every re-plan: the grasp is loose, and the
+            # last plan was aimed from a pose the object has since left. A
+            # tube that shifted 1.9, 6.3, 2.6 then 7.1 mm across four plans
+            # fell out of the fingers on the first move when this ran anyway.
+            return Result(False, {"planning_error": f"held object kept shifting in the hand across planning "
+                                                    f"({plan.held_shift_m * 1000:.1f} mm on the last of "
+                                                    f"{max_replans + 1} tries); not executed",
+                                  "held_object_disturbed": True})
         self.execute(plan, pipette=pipette)
         return Result(True)
 
@@ -145,6 +226,12 @@ class Expert:
         hand_pos = np.asarray(tip_des) - R_h @ T_ho[:3, 3]
         return hand_pos + R_h @ lab_scene.TCP_LOCAL, R_h
 
+    def grasp_contacts(self, name):
+        """Which colliders touch a just-grasped object, and how often --
+        shortened to the last two path elements (e.g. right_finger/Box_3)."""
+        c = lab_scene.contacts_of(self.env.objects[name]["path"])
+        return {"/".join(k.split("/")[-2:]): v["n"] for k, v in c.items()}
+
     def others_unmoved(self, before, exclude, tol=0.001):
         moved = {}
         for n, p in before.items():
@@ -159,12 +246,42 @@ class Expert:
         return {n: self.pose(n) for n in self.env.objects}
 
     # ----------------------------------------------------------- primitives
-    def pick_tube_from_holder(self, tube):
+    def pick_frame(self, tip, top, tube, closing_y):
+        """Hand frame for a holder pick: closing along closing_y if the
+        approach, grasp and lift keep PICK_MARGIN from the joint limits, else
+        the first of closing_y turned 90, -90 or 180 deg about the vertical
+        that does (or the one with most margin). The tube is round, so the
+        carry to a bore can turn the hand about it; with the holder anywhere
+        on the bench (layout.py) the bore's own axis can put joint 7 on its
+        stop at the slot."""
+        c = np.asarray(closing_y, float)
+        perp = np.cross([0, 0, 1.0], c)
+        pts = [np.array([tip[0], tip[1], z]) for z in
+               (top + HOVER, top - GRASP_DEPTH, self.holder_top + LIFT_CLEARANCE + self.tube_len(tube) - GRASP_DEPTH)]
+        best = None
+        for k, cand in enumerate((c, perp, -perp, -c)):
+            R = frame_from_axis(Z_DOWN, cand)
+            m = np.inf
+            for p in pts:
+                q, ok, *_ = self.pl.kin.ik(p, R, self.env.q_cmd)
+                m = min(m, self.pl.limit_margin(q) if ok else -1.0)
+            if m >= PICK_MARGIN:
+                if k:
+                    print(f"[holder grasp] closing turned {(0, 90, -90, 180)[k]} deg from the requested axis "
+                          f"(margin {m:.3f} rad)", flush=True)
+                return R
+            if best is None or m > best[0]:
+                best = (m, R)
+        return best[1]
+
+    def pick_tube_from_holder(self, tube, closing_y=None):
+        """closing_y: the closing axis to grasp with -- pass the target bore's
+        (closing_for_bore) so the insert needs no turn about the tube."""
         path = self.env.objects[tube]["path"]
         before = self.snapshot_objects()
         tip = self.pose(tube)[:3]
         top = tip[2] + self.tube_len(tube)
-        R = frame_from_axis(Z_DOWN, self.closing_y)
+        R = self.pick_frame(tip, top, tube, self.closing_y if closing_y is None else closing_y)
         r = self.env.objects[tube]["size"][0] / 2
         res = self.plan_and_go([
             Waypoint("approach", np.array([tip[0], tip[1], top + HOVER]), R, GRIPPER_OPEN, speed=FAST),
@@ -191,29 +308,83 @@ class Expert:
         ok = (p[2] > self.holder_top + LIFT_CLEARANCE - 0.004 and tilt < 5 and not info["others_moved"])
         return Result(ok, info)
 
+    def tube_vs_bore(self, tube, bore, s_des):
+        """Held tube against the bore at pre-insert: axis angle (deg), tip
+        offset from its aim point (m, vector) and from the bore axis (m)."""
+        p = self.pose(tube)
+        ax = lab_scene.quat_to_matrix(p[3:7])[:, 2]
+        ang = float(np.degrees(np.arccos(np.clip(ax @ bore.axis, -1, 1))))
+        err = p[:3] - bore.at(s_des)
+        return ang, err, bore.radial_offset(p[:3])
+
     def insert_tube_into_bore(self, tube, bore_idx):
         path = self.env.objects[tube]["path"]
         bore = self.bores[bore_idx]
         r = self.env.objects[tube]["size"][0] / 2
-        R_nom = frame_from_axis(-bore.axis, self.closing_y)
+        R_nom = frame_from_axis(-bore.axis, self.closing_for_bore(bore_idx))
         tgt = {}
+        s_pre = RELEASE_TIP_S + INSERT_STROKE
+        bias = np.zeros(3)      # aim offset for the tube tip, from measured pre-insert error
 
-        def waypoints():
-            tcp_rel, R_h = self.hand_target_for_object(tube, bore.at(RELEASE_TIP_S), bore.axis, R_nom)
-            tcp_pre, _ = self.hand_target_for_object(tube, bore.at(RELEASE_TIP_S + INSERT_STROKE),
-                                                     bore.axis, R_nom)
+        def approach(transit=True):
+            # targets from the tube's pose in the hand measured NOW: a tube
+            # that slipped or rotated in the grasp is aimed from where it is
+            tcp_pre, R_h = self.hand_target_for_object(tube, bore.at(s_pre) + bias, bore.axis, R_nom)
             tgt.update(tcp_pre=tcp_pre, R_h=R_h)
-            return [
-                Waypoint("transit", tcp_pre + [0, 0, TRANSIT_RAISE], R_h, r + 0.0002, gripper=1.0,
-                         speed=FAST, ang_speed=0.6),
-                Waypoint("pre_insert", tcp_pre, R_h, r + 0.0002, gripper=1.0, speed=SLOW),
-                Waypoint("insert", tcp_rel, R_h, r + 0.0002, gripper=1.0, speed=INSERT,
-                         allow=(self.env.objects["centrifuge_body"]["path"],)),
-            ]
+            pre = Waypoint("pre_insert" if transit else "pre_insert_correct", tcp_pre, R_h, r + 0.0002,
+                           gripper=1.0, speed=SLOW)
+            if not transit:
+                return [pre]
+            return [Waypoint("transit", tcp_pre + [0, 0, TRANSIT_RAISE], R_h, r + 0.0002, gripper=1.0,
+                             speed=INSERT_CARRY_SPEED, ang_speed=INSERT_CARRY_ANG_SPEED), pre]
 
-        res = self.plan_and_go(waypoints, held=path)
+        def insert():
+            tcp_rel, R_h = self.hand_target_for_object(tube, bore.at(RELEASE_TIP_S) + bias, bore.axis, R_nom)
+            tgt.update(R_h=R_h)
+            return [Waypoint("insert", tcp_rel, R_h, r + 0.0002, gripper=1.0, speed=INSERT,
+                             allow=(self.env.objects["centrifuge_body"]["path"],))]
+
+        # The whole path, insert included, must plan before anything moves: a
+        # bore the hand can't enter (e.g. one where the arm hits the rotor on
+        # the insert) is then rejected with the world untouched, not after
+        # the carry to pre-insert has already been executed.
+        full = self.pl.plan(approach() + insert(), held=[path], q_cmd=self.env.q_cmd)
+        if not full.ok:
+            return Result(False, {"planning_error": full.error})
+        res = self.plan_and_go(approach, held=path)
         if not res.success:
             return res
+        # Closed loop at pre-insert, before the tube enters the 0.5 mm-clearance
+        # bore: the carry from the holder (a fast 40 deg turn) can rotate or
+        # slide the tube in the grasp after its in-hand pose was measured for
+        # planning. A tube 4.4 deg off the bore axis jammed on the rotor and
+        # fell over when released. Measure once the hand has settled; re-aim
+        # from the tube's measured pose until it is coaxial, or stop here with
+        # the tube still held.
+        align = []
+        for attempt in range(PRE_INSERT_TRIES):
+            self.gripper(1.0, PRE_INSERT_SETTLE_STEPS)
+            ang, err, radial = self.tube_vs_bore(tube, bore, s_pre)
+            align.append({"axis_vs_bore_deg": ang, "tip_err_m": float(np.linalg.norm(err)), "tip_radial_m": radial})
+            if ang <= PRE_INSERT_AXIS_TOL_DEG and radial <= PRE_INSERT_POS_TOL:
+                break
+            # Within the limits after the first aim: insert. A re-aim moves the
+            # held tube again and can leave it worse -- 0.60 mm became 2.6, 3.4,
+            # 4.1 mm over three re-aims (v4 chain 2) as it swung in the grasp.
+            if attempt == 0 and ang <= PRE_INSERT_AXIS_MAX_DEG and radial <= PRE_INSERT_POS_MAX:
+                break
+            if attempt == PRE_INSERT_TRIES - 1:
+                if ang <= PRE_INSERT_AXIS_MAX_DEG and radial <= PRE_INSERT_POS_MAX:
+                    break
+                return Result(False, {"error": "tube not coaxial with the bore at pre-insert; not inserted",
+                                      "pre_insert_alignment": align})
+            bias = bias - err
+            res = self.plan_and_go(lambda: approach(transit=False), held=path)
+            if not res.success:
+                return Result(False, {**res.info, "pre_insert_alignment": align})
+        res = self.plan_and_go(insert, held=path)
+        if not res.success:
+            return Result(False, {**res.info, "pre_insert_alignment": align})
         tcp_pre, R_h = tgt["tcp_pre"], tgt["R_h"]
         before = self.snapshot_objects()
         self.gripper(OPEN_CMD, OPEN_STEPS)
@@ -226,10 +397,31 @@ class Expert:
         if not res.success:
             return Result(False, {"seat": seat, **res.info})
         moved = float(np.linalg.norm(self.pose(tube)[:3] - seated[:3]))
-        return Result(moved < 5e-5 and not self.others_unmoved(before, {tube}),
-                      {"seat": seat, "tube_moved_by_retract_m": moved})
+        # The retract must not have pulled the tube out: still seated (depth,
+        # axis, touching only the rotor) and within RETRACT_MOVE_MAX of where
+        # it was. A tube still settling its last fraction of a mm in a tilted
+        # bore moved 0.05+ mm over the 2 s retract without the hand touching it.
+        after = self._seat_measure(tube, bore)
+        still = (-0.0165 <= after["tip_s_m"] <= -0.0150 and after["axis_vs_bore_deg"] <= 4.0
+                 and after["max_penetration_m"] <= 2e-4
+                 and set(after["contacts"]) <= {self.env.objects["centrifuge_body"]["path"]})
+        ok = (moved < 5e-5 or (still and moved < RETRACT_MOVE_MAX)) and not self.others_unmoved(before, {tube})
+        return Result(bool(ok), {"seat": seat, "tube_moved_by_retract_m": moved, "seated_after_retract": still,
+                                 "pre_insert_alignment": align})
 
     def seat_check(self, tube, bore):
+        # "at rest" is measured over 2 steps; a tube still settling the last
+        # fraction of a mm (0.065 mm vs the 0.05 mm limit, otherwise seated)
+        # gets a few more steps before being judged
+        for attempt in range(SEAT_REST_TRIES):
+            info = self._seat_measure(tube, bore)
+            if info["motion_m"] < 5e-5:
+                break
+            self.gripper(OPEN_CMD, 5)
+        info["rest_checks"] = attempt + 1
+        return info
+
+    def _seat_measure(self, tube, bore):
         p0 = self.pose(tube)
         self.gripper(OPEN_CMD, 2)
         p = self.pose(tube)
@@ -254,7 +446,7 @@ class Expert:
         p = self.pose(tube)
         ax = lab_scene.quat_to_matrix(p[3:7])[:, 2]
         top = p[:3] + self.tube_len(tube) * ax
-        R = frame_from_axis(-ax, self.closing_y)
+        R = frame_from_axis(-ax, self.closing_for_bore(bore_idx))
         tcp_grasp = top - REMOVE_GRASP_DEPTH * ax
         tcp_pre = tcp_grasp + 0.04 * ax
         res = self.plan_and_go([
@@ -266,8 +458,9 @@ class Expert:
             return res
         self.gripper(1.0, CLOSE_STEPS)
         gap = self.finger_gap()
+        contacts = self.grasp_contacts(tube)
         if abs(gap - 2 * r) > 0.001:
-            return Result(False, {"grasp_gap_m": gap, "expected_m": 2 * r})
+            return Result(False, {"grasp_gap_m": gap, "expected_m": 2 * r, "grasp_contacts": contacts})
         # Out along the BORE axis (a straight bore: every point of the tube
         # moves parallel to the walls, so a tube resting against them can't
         # dig in), until the tip is clear of the opening; then up and back
@@ -275,7 +468,7 @@ class Expert:
         tip_clear_s = bore.opening_s + 0.015
         lift = (tip_clear_s - bore.s_of(p[:3])) * bore.axis
         cent = self.env.objects["centrifuge_body"]["path"]
-        R_up = frame_from_axis(Z_DOWN, self.closing_y)
+        R_up = frame_from_axis(Z_DOWN, self.closing_for_bore(bore_idx))
         tcp_out = tcp_grasp + lift + np.array([0, 0, TRANSIT_RAISE])
         res = self.plan_and_go([
             Waypoint("extract", tcp_grasp + lift, R, r + 0.0002, gripper=1.0, speed=INSERT, allow=(cent,)),
@@ -286,34 +479,77 @@ class Expert:
         self.gripper(1.0, 3)
         q = self.pose(tube)
         tilt = math.degrees(math.acos(np.clip(lab_scene.quat_to_matrix(q[3:7])[2, 2], -1, 1)))
-        info = {"tip_z": float(q[2]), "tilt_deg": tilt, "grasp_gap_m": gap,
-                "others_moved": self.others_unmoved(before, {tube})}
+        info = {"tip_z": float(q[2]), "tilt_deg": tilt, "grasp_gap_m": gap, "grasp_contacts": contacts,
+                "grasp_depth_m": REMOVE_GRASP_DEPTH, "others_moved": self.others_unmoved(before, {tube})}
         rim = lab_scene.centrifuge_pos()[2] + lab_scene.CENTRIFUGE_EXTENTS[2]
         ok = q[2] > bore.at(tip_clear_s)[2] and tilt < 8 and not info["others_moved"]
         info["above_rotor_by_m"] = float(q[2] - bore.at(tip_clear_s)[2])
         return Result(bool(ok), info)
 
-    def place_tube_into_holder(self, tube, slot_rc):
+    def place_tube_into_holder(self, tube, slot_rc, closing_y=None):
+        """closing_y: the hand's closing axis (default self.closing_y); pass
+        the axis the tube is held with, e.g. its bore's after a removal."""
         path = self.env.objects[tube]["path"]
         r = self.env.objects[tube]["size"][0] / 2
-        sx = self.holder_xy[0] + lab_scene.HOLDER_HOLE_X_MM[slot_rc[1]] * lab_scene.MM_TO_M
-        sy = self.holder_xy[1] + lab_scene.HOLDER_HOLE_Y_MM[slot_rc[0]] * lab_scene.MM_TO_M
-        R_nom = frame_from_axis(Z_DOWN, self.closing_y)
+        sx, sy = lab_scene.holder_slot_xy(*slot_rc)
+        # the held tube's axis, or turned about the tube if that runs out of
+        # joint range over this slot (pick_frame; poses as for a pick there)
+        R_nom = self.pick_frame(np.array([sx, sy, self.holder_floor]), self.holder_floor + self.tube_len(tube),
+                                tube, self.closing_y if closing_y is None else closing_y)
         up = np.array([0, 0, 1.0])
         tgt = {}
+        above = np.array([sx, sy, self.holder_top + LIFT_CLEARANCE])
+        bias = np.zeros(3)      # aim offset for the tube tip, from the measured error above the slot
 
-        def waypoints():
-            tcp_low, R_h = self.hand_target_for_object(tube, [sx, sy, self.holder_floor + PLACE_TIP_GAP], up, R_nom)
-            tcp_above, _ = self.hand_target_for_object(tube, [sx, sy, self.holder_top + LIFT_CLEARANCE], up, R_nom)
+        def to_above(carry=True):
+            tcp_above, R_h = self.hand_target_for_object(tube, above + bias, up, R_nom)
+            return [Waypoint("above_slot" if carry else "above_slot_correct", tcp_above, R_h, r + 0.0002,
+                             gripper=1.0, speed=PLACE_CARRY_SPEED if carry else SLOW, ang_speed=0.6)]
+
+        def lower():
+            low = np.array([sx, sy, self.holder_floor + PLACE_TIP_GAP])
+            tcp_low, R_h = self.hand_target_for_object(tube, low + bias, up, R_nom)
             tgt.update(tcp_low=tcp_low, R_h=R_h)
-            return [
-                Waypoint("above_slot", tcp_above, R_h, r + 0.0002, gripper=1.0, speed=FAST, ang_speed=0.6),
-                Waypoint("lower", tcp_low, R_h, r + 0.0002, gripper=1.0, speed=SLOW, allow=(HOLDER_PATH,)),
-            ]
+            return [Waypoint("lower", tcp_low, R_h, r + 0.0002, gripper=1.0, speed=SLOW, allow=(HOLDER_PATH,))]
 
-        res = self.plan_and_go(waypoints, held=path)
+        # As for the rotor insert: the whole path must plan before anything
+        # moves; then stop above the slot, measure the tube, and re-aim until
+        # it is over the 8 mm bore (0.5 mm clearance) before lowering. A tube
+        # re-grasped from the rotor slipped 0.7 mm in the grasp early in the
+        # carry, after its in-hand pose had been measured for planning, and
+        # jammed on the bore's edge.
+        full = self.pl.plan(to_above() + lower(), held=[path], q_cmd=self.env.q_cmd)
+        if not full.ok:
+            return Result(False, {"planning_error": full.error})
+        res = self.plan_and_go(to_above, held=path)
         if not res.success:
             return res
+        align = []
+        for attempt in range(PLACE_ALIGN_TRIES):
+            self.gripper(1.0, PLACE_ALIGN_SETTLE_STEPS)
+            p = self.pose(tube)
+            ang = math.degrees(math.acos(np.clip(lab_scene.quat_to_matrix(p[3:7])[2, 2], -1, 1)))
+            err = p[:3] - above
+            align.append({"tilt_deg": ang, "tip_err_m": float(np.linalg.norm(err)),
+                          "tip_xy_err_m": float(np.linalg.norm(err[:2]))})
+            if ang <= PLACE_ALIGN_TILT_TOL_DEG and np.linalg.norm(err[:2]) <= PLACE_ALIGN_XY_TOL:
+                break
+            # within the limits after the first aim: lower (re-aims moving the
+            # held tube took 0.51 mm to 1.1 mm, as at the rotor's pre-insert)
+            if attempt == 0 and ang <= PLACE_ALIGN_TILT_MAX_DEG and np.linalg.norm(err[:2]) <= PLACE_ALIGN_XY_MAX:
+                break
+            if attempt == PLACE_ALIGN_TRIES - 1:
+                if ang <= PLACE_ALIGN_TILT_MAX_DEG and np.linalg.norm(err[:2]) <= PLACE_ALIGN_XY_MAX:
+                    break
+                return Result(False, {"error": "tube not over the slot's bore; not lowered",
+                                      "above_slot_alignment": align})
+            bias = bias - err
+            res = self.plan_and_go(lambda: to_above(carry=False), held=path)
+            if not res.success:
+                return Result(False, {**res.info, "above_slot_alignment": align})
+        res = self.plan_and_go(lower, held=path)
+        if not res.success:
+            return Result(False, {**res.info, "above_slot_alignment": align})
         tcp_low, R_h = tgt["tcp_low"], tgt["R_h"]
         before = self.snapshot_objects()
         self.gripper(OPEN_CMD, OPEN_STEPS)
@@ -327,7 +563,7 @@ class Expert:
         info = {"tip_above_floor_m": float(q[2] - self.holder_floor),
                 "radial_offset_m": float(np.hypot(q[0] - sx, q[1] - sy)), "tilt_deg": tilt,
                 "moved_by_retract_m": float(np.linalg.norm(q[:3] - p[:3])),
-                "others_moved": self.others_unmoved(before, {tube})}
+                "others_moved": self.others_unmoved(before, {tube}), "above_slot_alignment": align}
         # Inside the bore is guaranteed by the physics; the radial check only
         # catches a wrong slot (61.5 mm pitch). The conical tip lets a standing
         # tube rest ~0.6 mm off-center.
@@ -343,6 +579,12 @@ class Expert:
     TRAY_OPEN = 0.020
     TRAY_GRASP_Z = 0.005
     TRAY_LIFT = 0.06
+    # a carry that would pass over a taller object goes up, across and down:
+    # the lifted tray hangs 6 cm up, below the tube tops, and with the objects
+    # anywhere (layout.py) a destination across the tube rack swept it
+    # through them (clearance_z)
+    TRAY_TRANSIT_MIN_XY = 0.05
+    TRAY_TRANSIT_NEAR = 0.04
 
     def tray_hand_rotation(self, tray_xy, yaw):
         """Hand pointing down, closing across the tray's width; of the two
@@ -390,6 +632,69 @@ class Expert:
                 "others_moved": self.others_unmoved(before, {"tray"})}
         return Result(info["lifted_m"] > self.TRAY_LIFT - 0.005 and tilt < 3.0 and not info["others_moved"], info)
 
+    # the tall objects a carried object can hit (prim name prefixes under
+    # /World/Platform), and how far above each one's top a crossing passes
+    OBSTACLE_PRIMS = {"holder": ("TubeHolder", "Tube_"), "tip_rack": ("TipRack", "Tips"),
+                      "waste_bin": ("WasteBin",), "centrifuge": ("Centrifuge",)}
+    # (the tops are measured bounds, and the planner rehearses the path for
+    # collisions; 5 cm over the centrifuge put a far-out tip beyond IK reach)
+    OBSTACLE_CLEAR = {"holder": 0.03, "tip_rack": 0.03, "waste_bin": 0.03, "centrifuge": 0.03}
+
+    def obstacle_tops(self):
+        """{object: top z} from the stage's world bounds (once per chain: the
+        holder counts its tubes, the rack its tips)."""
+        if getattr(self, "_tops", None) is None:
+            import omni.usd
+            from pxr import Usd, UsdGeom
+            stage = omni.usd.get_context().get_stage()
+            cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render])
+            tops = {}
+            for prim in stage.GetPrimAtPath("/World/Platform").GetChildren():
+                for k, prefixes in self.OBSTACLE_PRIMS.items():
+                    if any(prim.GetName().startswith(p) for p in prefixes):
+                        top = cache.ComputeWorldBound(prim).ComputeAlignedRange().GetMax()[2]
+                        tops[k] = max(tops.get(k, -1e9), float(top))
+            self._tops = tops
+            print(f"[obstacles] tops above the platform: "
+                  f"{ {k: round(v - lab_scene.BENCH_Z - 0.04, 3) for k, v in tops.items()} }", flush=True)
+        return self._tops
+
+    def crossings(self, a, b, near):
+        """The tall objects the straight xy path a -> b comes within `near`
+        of: [(t_in, t_out, z)], z = the height a carried object's lowest point
+        must cross at (top + OBSTACLE_CLEAR), t along the path; and the
+        clearance height of the object a starts in (or None). Objects whose
+        footprint (grown by `near`) holds a or b are not crossings: the move
+        starts out of or ends over them, and its own approach handles those."""
+        import layout
+        if layout._CURRENT is None:
+            return [], None
+        a, b = np.asarray(a[:2], float), np.asarray(b[:2], float)
+
+        def inside(q, p):
+            s = [np.cross(q[(i + 1) % 4] - q[i], p - q[i]) for i in range(4)]
+            return all(v >= 0 for v in s) or all(v <= 0 for v in s)
+
+        ts = np.linspace(0.0, 1.0, 81)
+        out, z_start = [], None
+        for name, top in self.obstacle_tops().items():
+            q = layout._corners(name, *layout._CURRENT[name], extra=near, hand=False)
+            z = top + self.OBSTACLE_CLEAR[name]
+            if inside(q, a):
+                z_start = max(-1e9 if z_start is None else z_start, z)
+                continue
+            if inside(q, b):
+                continue
+            hit = [t for t in ts if inside(q, a + t * (b - a))]
+            if hit:
+                out.append((max(0.0, hit[0] - 0.0125), min(1.0, hit[-1] + 0.0125), z))
+        return sorted(out), z_start
+
+    def clearance_z(self, a, b, near):
+        """Height to cross the whole path a -> b at (crossings), or None."""
+        c, _ = self.crossings(a, b, near)
+        return max(z for *_, z in c) if c else None
+
     def place_tray(self, xy, yaw=0.0):
         """Set the held tray down level at xy (bench), long side at yaw."""
         path = self.env.objects["tray"]["path"]
@@ -399,12 +704,18 @@ class Expert:
         tgt = {}
 
         def waypoints():
-            T_ho = np.linalg.inv(pose_matrix(lab_scene.get_prim_world_pose(lab_scene.HAND_PATH))) \
-                @ pose_matrix(self.pose("tray"))
+            T_now = pose_matrix(self.pose("tray"))
+            T_ho = np.linalg.inv(pose_matrix(lab_scene.get_prim_world_pose(lab_scene.HAND_PATH))) @ T_now
+            here, there = T_now[:3, 3], np.array([xy[0], xy[1], z_bench])
+            steps = [("carry", xy, self.TRAY_LIFT, FAST), ("lower", xy, 0.0015, SLOW)]
+            z = self.clearance_z(here, there, self.TRAY_TRANSIT_NEAR)
+            if (np.hypot(*(there[:2] - here[:2])) > self.TRAY_TRANSIT_MIN_XY and z is not None
+                    and z > z_bench + self.TRAY_LIFT):
+                steps = [("raise", here[:2], z - z_bench, SLOW), ("cross", xy, z - z_bench, FAST)] + steps
             wps = []
-            for phase, dz, spd in (("carry", self.TRAY_LIFT, FAST), ("lower", 0.0015, SLOW)):
+            for phase, at, dz, spd in steps:
                 T_des = np.eye(4)
-                T_des[:3, :3], T_des[:3, 3] = Rz, [xy[0], xy[1], z_bench + dz]
+                T_des[:3, :3], T_des[:3, 3] = Rz, [at[0], at[1], z_bench + dz]
                 Th = T_des @ np.linalg.inv(T_ho)
                 tcp = Th[:3, 3] + Th[:3, :3] @ lab_scene.TCP_LOCAL
                 tgt[phase] = (tcp, Th[:3, :3])

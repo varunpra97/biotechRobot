@@ -22,7 +22,7 @@ PIPETTE_OPEN_CMD = 1.0 - PIPETTE_OPEN / lab_scene.GRIPPER_STROKE
 PIPETTE_HELD = 0.0094              # finger value used for planning while holding it
 PIPETTE_GRASP_Y = 0.11             # grasp point along the pipette (local y from the nozzle end)
 PIPETTE_GRASP_BELOW_AXIS = 0.006   # fingertips this far below the body axis
-READY_NOZZLE = (0.22, 1.52)        # nozzle-down "ready" spot beside the tip rack (xy)
+READY_NOZZLE_FROM_RACK = lab_scene.PIPETTE_READY_FROM_RACK   # nozzle-down "ready" spot beside the tip rack (rack frame)
 NOZZLE_INSERT = 0.0048             # nozzle end below a tip's collar top when pressing on
                                    # (the seal engages at 4 mm; pushing further would just
                                    # drive the attached tip's collar into the rack)
@@ -31,6 +31,17 @@ ASPIRATE_BELOW_SURFACE = 0.003
 TIP_AIM_TOL = 0.0003               # tip end within this of its target before moving on
 TIP_SETTLE_STEPS = 6               # held pipette's swing after a move dies out in ~0.4 s
 ENTER_DEPTH = 0.004               # tip end this far inside a container before the final descent
+# Sideways moves of the held pipette that would pass over a taller object go
+# up, across and down, not straight: with the objects anywhere on the
+# platform (layout.py) a straight line from a well to the bin can pass
+# through the tube rack. The carried point (tip end or nozzle) crosses above
+# the tops of the objects its path comes within TRANSIT_NEAR of
+# (Expert.clearance_z); straight as before when nothing is in the way.
+TRANSIT_MIN_XY = 0.05
+TRANSIT_NEAR = 0.04
+# the pick-up's swing to the ready spot and the return to the bench move the
+# whole pipette, so they look wider
+SWING_NEAR = 0.10
 TUBE_RIM = liquids.TUBE_PROFILE[-1][0]
 WELL_TOP = liquids.WELL_TOP_Z
 
@@ -141,6 +152,7 @@ class PipetteExpert(Expert):
 
         p0 = np.asarray(phase_points[0][1], float)
         R_yaw, _ = self.choose_yaw(aligned(self.T_of(obj_path)[:3, :3]), p0, obj_path=obj_path)
+        phase_points = self.transit_points(obj_path, phase_points)
         errors, bias = {}, np.zeros(3)
         for k, (phase, p, spd, *opt) in enumerate(phase_points):
             correct = opt[0] if opt else True
@@ -181,6 +193,38 @@ class PipetteExpert(Expert):
             errors[phase] = float(np.linalg.norm(err))
         return Result(True, {"aim_error_m": errors})
 
+    def transit_points(self, obj_path, phase_points):
+        """phase_points with a crossing put in front, if the way to the first
+        point passes over taller objects: up only as far as the object it
+        leaves needs, then climbing on the way, at each crossed object's
+        height only over that object (Expert.crossings). Lifting straight to
+        the crossing height where the move starts put a far-out start (tip
+        box, holder at 0.65 m) beyond the arm's reach."""
+        cur = self.T_of(obj_path)[:3, 3]
+        p0 = np.asarray(phase_points[0][1], float)
+        if np.hypot(*(p0[:2] - cur[:2])) < TRANSIT_MIN_XY:
+            return phase_points
+        cross, z_start = self.crossings(cur, p0, TRANSIT_NEAR)
+        cross = [(t0, t1, z) for t0, t1, z in cross if z > min(cur[2], p0[2]) + 0.005]
+        if not cross:
+            return phase_points
+        merged = []                           # overlapping crossings become one
+        for t0, t1, z in cross:
+            if merged and t0 <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(t1, merged[-1][1]), max(z, merged[-1][2]))
+            else:
+                merged.append((t0, t1, z))
+        cross = merged
+        phase = phase_points[0][0]
+        pts = []
+        if z_start is not None and z_start > cur[2] + 0.005:
+            pts.append((f"{phase}_lift", np.array([cur[0], cur[1], z_start]), FAST, False))
+        for k, (t0, t1, z) in enumerate(cross):
+            for tag, t in (("in", t0), ("out", t1)):
+                xy = cur[:2] + t * (p0[:2] - cur[:2])
+                pts.append((f"{phase}_cross{k}_{tag}", np.array([xy[0], xy[1], max(z, p0[2])]), FAST, False))
+        return pts + list(phase_points)
+
     def pip_hold(self, steps, plunger=None, eject=0.0):
         p = self.pip.plunger_cmd if plunger is None else plunger
         for _ in range(steps):
@@ -198,12 +242,16 @@ class PipetteExpert(Expert):
         # the heading rule applied -- keeps the arm farthest from its joint
         # limits, checked with pure-math IK along the motion before touching
         # anything (the pipette's pose in the hand follows from the grasp).
-        best = (-2.0, None)
+        cands = []
         R_vert = rotation_between(ly, [0, 0, 1.0]) @ Tp[:3, :3]
-        ready_pos = np.array([*READY_NOZZLE, self.pz + 0.16])
+        ready_pos = self.ready_pos()
         up = Tp.copy()
         up[:3, 3] += [0, 0, 0.08]
-        for sign in (1.0, -1.0):
+        # Only the closing sign that puts the nozzle (and a tip) toward the
+        # wrist_side camera (hand -x): the other sign holds the pipette the
+        # other way round, and that camera then sees its top end with the tip
+        # hidden behind the hand. Layouts leave room for this grasp.
+        for sign in (1.0,):
             Rg = frame_from_axis(-lz, sign * lx)
             T_hand = np.eye(4)
             T_hand[:3, :3], T_hand[:3, 3] = Rg, tcp_grasp - Rg @ lab_scene.TCP_LOCAL
@@ -215,39 +263,27 @@ class PipetteExpert(Expert):
             _, m_turn = self.choose_yaw(R_vert, ready_pos, T_ho=T_ho, T_obj_from=up, q0=q_up)
             margin = min(self.pl.limit_margin(q), m_up, m_turn)
             print(f"[pick_up_pipette] closing sign {sign:+.0f}: joint-limit margin {margin:.3f} rad", flush=True)
-            if margin > best[0]:
-                best = (margin, Rg)
-        if best[0] <= 0:
+            if margin > 0:
+                cands.append((margin, sign, Rg))
+        if not cands:
             return Result(False, {"error": "no grasp orientation can turn the pipette nozzle-down "
                                            "within joint limits"})
-        R = best[1]
-        res = self.plan_and_go([
-            Waypoint("approach", tcp_grasp + 0.08 * lz, R, PIPETTE_OPEN, speed=FAST),
-            Waypoint("descend", tcp_grasp, R, PIPETTE_OPEN, speed=SLOW),
-        ])
-        if not res.success:
+        for margin, sign, R in cands:
+            res = self.plan_and_go([
+                Waypoint("approach", tcp_grasp + 0.08 * lz, R, PIPETTE_OPEN, speed=FAST),
+                Waypoint("descend", tcp_grasp, R, PIPETTE_OPEN, speed=SLOW),
+            ])
+            if res.success:
+                break
+            print(f"[pick_up_pipette] closing sign {sign:+.0f} blocked: {res.info}", flush=True)
+        else:
             return res
         self.gripper(1.0, CLOSE_STEPS)
         gap = self.finger_gap()
         if not 0.015 < gap < 0.021:
             return Result(False, {"grasp_gap_m": gap})
 
-        def waypoints():
-            Tn = self.T_of(self.pip_path)
-            up = Tn.copy()
-            up[:3, 3] += [0, 0, 0.08]
-            vert = np.eye(4)
-            vert[:3, :3], _ = self.choose_yaw(rotation_between(Tn[:3, 1], [0, 0, 1.0]) @ Tn[:3, :3],
-                                              ready_pos, obj_path=self.pip_path, T_obj_from=up,
-                                              q0=self.pl.kin.ik(*self.hand_target(self.pip_path, up),
-                                                                self.env.q_cmd)[0])
-            vert[:3, 3] = ready_pos
-            t1, R1 = self.hand_target(self.pip_path, up)
-            t2, R2 = self.hand_target(self.pip_path, vert)
-            return [Waypoint("lift", t1, R1, PIPETTE_HELD, gripper=1.0, speed=SLOW),
-                    Waypoint("nozzle_down", t2, R2, PIPETTE_HELD, gripper=1.0, speed=SLOW, ang_speed=0.5)]
-
-        res = self.plan_and_go(waypoints, held=self.pip_path)
+        res = self.turn_pipette_ready()
         if not res.success:
             return res
         self.gripper(1.0, 5)
@@ -258,6 +294,43 @@ class PipetteExpert(Expert):
         # later primitives re-aim the nozzle from its measured in-hand pose, so
         # this only has to be "turned nozzle-down and held"
         return Result(ang < 10.0 and n_end[2] > self.pz + 0.12 and not info["others_moved"], info)
+
+    def ready_pos(self):
+        """Where the nozzle end is held, nozzle-down, beside the tip rack."""
+        rx, ry = lab_scene.TIP_RACK_XY
+        dx, dy = lab_scene._turn(lab_scene.TIP_RACK_YAW_DEG, *READY_NOZZLE_FROM_RACK)
+        return np.array([rx + dx, ry + dy, self.pz + 0.16])
+
+    def turn_pipette_ready(self):
+        """From the pipette held (lying, as grasped): lift it and turn it
+        nozzle-down to the ready spot (the second half of pick_up_pipette;
+        also the generator eval's follow-up to the RL finisher's grasp)."""
+        ready_pos = self.ready_pos()
+
+        def waypoints():
+            Tn = self.T_of(self.pip_path)
+            # lifted 8 cm, the lying pipette's underside is ~6.5 cm above where its origin started
+            z_high = self.clearance_z(Tn[:3, 3], ready_pos, SWING_NEAR)
+            high = z_high is not None and z_high > Tn[2, 3] + 0.065
+            up = Tn.copy()
+            up[:3, 3] += [0, 0, max(0.08, z_high + 0.015 - Tn[2, 3]) if high else 0.08]
+            vert = np.eye(4)
+            vert[:3, :3], _ = self.choose_yaw(rotation_between(Tn[:3, 1], [0, 0, 1.0]) @ Tn[:3, :3],
+                                              ready_pos, obj_path=self.pip_path, T_obj_from=up,
+                                              q0=self.pl.kin.ik(*self.hand_target(self.pip_path, up),
+                                                                self.env.q_cmd)[0])
+            vert[:3, 3] = ready_pos
+            t1, R1 = self.hand_target(self.pip_path, up)
+            t2, R2 = self.hand_target(self.pip_path, vert)
+            wps = [Waypoint("lift", t1, R1, PIPETTE_HELD, gripper=1.0, speed=SLOW)]
+            if high:                          # over the ready spot first, nozzle above what is in the way
+                over = vert.copy()
+                over[2, 3] = max(ready_pos[2], z_high)
+                t3, R3 = self.hand_target(self.pip_path, over)
+                wps.append(Waypoint("over_ready", t3, R3, PIPETTE_HELD, gripper=1.0, speed=SLOW, ang_speed=0.5))
+            return wps + [Waypoint("nozzle_down", t2, R2, PIPETTE_HELD, gripper=1.0, speed=SLOW, ang_speed=0.5)]
+
+        return self.plan_and_go(waypoints, held=self.pip_path)
 
     def attach_tip(self, tip):
         ev0 = len(self.pip.events)
@@ -375,7 +448,8 @@ class PipetteExpert(Expert):
         self.pip_hold(1, eject=1.0)
         self.pip_hold(SETTLE_STEPS)
         p = lab_scene.get_prim_world_pose(self.env.objects[tip]["path"])
-        inside = abs(p[0] - bx) < 0.043 and abs(p[1] - by) < 0.043 and p[2] < bin_top
+        lx, ly = lab_scene._turn(-lab_scene.WASTE_BIN_YAW_DEG, p[0] - bx, p[1] - by)   # in the bin's frame
+        inside = abs(lx) < 0.043 and abs(ly) < 0.043 and p[2] < bin_top
         info = {"tip": tip, "tip_pos": p[:3].tolist(), "in_bin": bool(inside), "events": self.pip.events[ev0:]}
         bad = [e for e in info["events"] if e["event"] != "tip_ejected"]
         return Result(bool(inside) and self.pip.tip is None and not bad, info)
@@ -390,8 +464,18 @@ class PipetteExpert(Expert):
             low[:3, 3] += [0, 0, 0.006]
             t1, R1 = self.hand_target(self.pip_path, above)
             t2, R2 = self.hand_target(self.pip_path, low)
-            return [Waypoint("over_spot", t1, R1, PIPETTE_HELD, gripper=1.0, speed=SLOW, ang_speed=0.5),
-                    Waypoint("lower", t2, R2, PIPETTE_HELD, gripper=1.0, speed=SLOW)]
+            wps = []
+            Tn = self.T_of(self.pip_path)
+            z = self.clearance_z(Tn[:3, 3], home[:3, 3], SWING_NEAR)
+            if z is not None and z > Tn[2, 3]:
+                # still nozzle-down: up above what is in the way, across to over home
+                for phase, xy in (("rise", Tn[:2, 3]), ("cross", home[:2, 3])):
+                    T = Tn.copy()
+                    T[:3, 3] = [xy[0], xy[1], z]
+                    tc, Rc = self.hand_target(self.pip_path, T)
+                    wps.append(Waypoint(phase, tc, Rc, PIPETTE_HELD, gripper=1.0, speed=SLOW))
+            return wps + [Waypoint("over_spot", t1, R1, PIPETTE_HELD, gripper=1.0, speed=SLOW, ang_speed=0.5),
+                          Waypoint("lower", t2, R2, PIPETTE_HELD, gripper=1.0, speed=SLOW)]
 
         res = self.plan_and_go(waypoints, held=self.pip_path)
         if not res.success:

@@ -82,13 +82,51 @@ TEMPLATES = {
         "place the tray {spot}",
         "set the sample plate down {spot}",
     ],
+    # Chained episodes: one prompt for a whole sequence of primitives
+    # (collect_primitives.CHAINED).
+    "transfer_to_well": [
+        "transfer {vol} uL from tube {src} to well {well}",
+        "with a fresh tip, move {vol} microliters from the tube in slot {src} into plate well {well}",
+        "pipette {vol} uL out of tube {src} into well {well}, then discard the tip",
+    ],
+    "transfer_to_tube": [
+        "transfer {vol} uL from tube {src} to tube {dst}",
+        "with a fresh tip, move {vol} microliters from the tube in slot {src} into the tube in slot {dst}",
+        "pipette {vol} uL out of tube {src} into tube {dst}, then discard the tip",
+    ],
+    "load_tube_into_centrifuge": [
+        "move the test tube in holder slot {slot} into centrifuge slot {bore}",
+        "take the tube from rack slot {slot} and load it into rotor position {bore}",
+        "put the tube from slot {slot} into centrifuge bore {bore}",
+    ],
+    "unload_tube_to_holder": [
+        "take the tube out of centrifuge slot {bore} and put it in holder slot {slot}",
+        "move the test tube from rotor position {bore} to rack slot {slot}",
+        "unload the tube in centrifuge bore {bore} into slot {slot} of the rack",
+    ],
+    "move_tray": [
+        "move the sample tray {dest}",
+        "carry the 10-well tray {dest}",
+        "relocate the sample plate {dest}",
+    ],
 }
 
-# where the tray can be put down (prompt phrase -> bench xy, see lab_scene)
-TRAY_SPOTS = {
-    "home": "back in its original spot",
-    "right": "on the right side of the bench, next to the tip box",
-}
+# where the tray can be put down: back home, or beside another object
+# ("side:landmark" keys from layout.tray_spots; sides as seen from the arm)
+TRAY_SPOTS = {"home": "back in its original spot"}
+# ... and as the destination of a whole move (chained move_tray prompts)
+TRAY_DESTINATIONS = {"home": "back to its original spot"}
+TRAY_SIDES = {"left": "to the left of", "right": "to the right of", "front": "in front of", "behind": "behind"}
+LANDMARKS = {"tip_rack": "the tip box", "waste_bin": "the waste bin", "holder": "the tube rack",
+             "centrifuge": "the centrifuge"}
+
+
+def tray_spot(key, dest=False):
+    """Prompt phrase for a tray spot key: "home" or "side:landmark"."""
+    if key == "home":
+        return (TRAY_DESTINATIONS if dest else TRAY_SPOTS)["home"]
+    side, landmark = key.split(":")
+    return f"{TRAY_SIDES[side]} {LANDMARKS[landmark]}"
 
 
 def slot_name(r, c):

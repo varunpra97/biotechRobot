@@ -123,7 +123,7 @@ def main():
     from omni.physx import get_physx_scene_query_interface
     from pxr import PhysicsSchemaTools, Sdf
 
-    arm, cams, objects = lab_scene.build_scene(simulation_app, rigid_objects=(SOURCE_TUBE,))
+    arm, cams, objects = lab_scene.build_scene(simulation_app, rigid_objects=(SOURCE_TUBE,), all_cameras=True)
     cam_names = sorted(cams.keys())
     obj_names = sorted(objects.keys())
     for name in cam_names:

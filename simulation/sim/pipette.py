@@ -40,6 +40,8 @@ TIP_END_R = 0.00045                      # tip outer radius at its end
 TIP_BODY_TOP_R = 0.0037                  # ... under the collar (z = 52 mm)
 TUBE_RIM_Z = 0.058
 WALL_CLEARANCE = 0.0                     # contact if the tip's outer surface reaches the wall
+EMPTY_TIP_UL = 0.05                      # less left in a tip counts as empty (liquids.LiquidBody hides < 0.05 uL);
+                                         # a float residue of ~5e-15 uL once failed a perfect eject
 
 
 def T(pose):
@@ -202,7 +204,7 @@ class PipetteModel:
 
         joint = UsdPhysics.Joint(stage_utils.get_current_stage().GetPrimAtPath(self.joint_path))
         joint.CreateJointEnabledAttr().Set(False)
-        if self.tip_volume > 0:
+        if self.tip_volume > EMPTY_TIP_UL:
             self.log("ejected_with_liquid", volume_ul=self.tip_volume)
         self.log("tip_ejected", tip=self.tip)
         self.tip = None
@@ -260,6 +262,9 @@ class PipetteModel:
             return
         out = min(dv, self.tip_volume)
         self.tip_volume -= out
+        if self.tip_volume < 1e-9:      # float residue of the per-update steps, not liquid
+            out += self.tip_volume
+            self.tip_volume = 0.0
         self.tip_liquid.set_volume(self.tip_volume)
         end, _ = self.tip_end()
         hit = self.container_of(end)

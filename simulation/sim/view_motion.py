@@ -75,7 +75,7 @@ def main():
     update = simulation_app.update
 
     arm, cams, objects = lab_scene.build_scene(
-        simulation_app, rigid_objects=(source,) if source else ())
+        simulation_app, rigid_objects=(source,) if source else (), all_cameras=True)
     print(f"scene ready: {len(cams)} cameras")
 
     if args.multi_view and not args.headless:

@@ -1,13 +1,14 @@
 """Convert recorded sim episodes (sim/lab_env.EpisodeRecorder) into the
 LeRobot dataset π0.5 fine-tunes on -- the layout of openpi's own DROID
 converter (examples/droid/convert_droid_data_to_lerobot.py), so the DROID
-recipe (joint-velocity actions, 15 Hz, exterior + wrist camera) carries over:
+recipe (joint-velocity actions, 15 Hz, exterior + wrist cameras) carries over:
 
   exterior_image_1_left  platform_cam1 (fixed, whole platform)   240x320x3
-  wrist_image_left       the episode's policy wrist camera        240x320x3
-                         (meta "policy_wrist_camera": one of the three
-                         wrist cameras, chosen per primitive --
-                         lab_env.PRIMITIVE_WRIST_CAMERA)
+  wrist_image_left       wrist_top (beside the fingers, looking   240x320x3
+                         down the approach axis)
+  wrist_image_right      wrist_side (nozzle side, fingertip       240x320x3
+                         level: pipette, tip and its target)
+(lab_env.POLICY_CAMERAS: the same three views in every episode)
   joint_position         7  rad
   gripper_position       1  0 open .. 1 closed
   pipette_state          2  plunger fraction, tip attached
@@ -36,7 +37,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-EXTERIOR = "platform_cam1"
+EXTERIOR, WRIST_LEFT, WRIST_RIGHT = "platform_cam1", "wrist_top", "wrist_side"
 IMAGE_HW = (240, 320)
 FPS = 15
 ACTION_DIM = 10
@@ -59,9 +60,13 @@ def main():
     from lerobot.common.datasets.lerobot_dataset import HF_LEROBOT_HOME, LeRobotDataset
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", required=True, help="folder of <primitive>/ep_XXXX episodes")
+    ap.add_argument("--src", required=True, nargs="+",
+                    help="folder(s) of <primitive>/ep_XXXX episodes, exported into one dataset")
     ap.add_argument("--repo-id", default="local/biotech_lab")
     ap.add_argument("--include-failed", action="store_true")
+    ap.add_argument("--from-handover", action="store_true",
+                    help="recovery episodes (sim/recover_from_eval.py): export only the expert's part, from the "
+                         "step the policy's replayed attempt ended (meta prefix_steps)")
     args = ap.parse_args()
 
     out = HF_LEROBOT_HOME / args.repo_id
@@ -75,6 +80,7 @@ def main():
         features={
             "exterior_image_1_left": {"dtype": "image", "shape": shape, "names": ["height", "width", "channel"]},
             "wrist_image_left": {"dtype": "image", "shape": shape, "names": ["height", "width", "channel"]},
+            "wrist_image_right": {"dtype": "image", "shape": shape, "names": ["height", "width", "channel"]},
             "joint_position": {"dtype": "float32", "shape": (7,), "names": ["joint_position"]},
             "gripper_position": {"dtype": "float32", "shape": (1,), "names": ["gripper_position"]},
             "pipette_state": {"dtype": "float32", "shape": (2,), "names": ["pipette_state"]},
@@ -85,18 +91,19 @@ def main():
     )
 
     kept, skipped, frames = 0, [], 0
-    for ep_dir, meta in episodes(Path(args.src)):
+    for ep_dir, meta in (e for src in args.src for e in episodes(Path(src))):
         if not meta["success"] and not args.include_failed:
             skipped.append(str(ep_dir))
             continue
         d = np.load(ep_dir / "steps.npz")
-        wrist = meta.get("policy_wrist_camera", "wrist")
         n = len(d["action"])
         assert d["action"].shape[1] == ACTION_DIM, ep_dir
-        for t in range(n):
+        t0 = int(meta.get("prefix_steps", 0)) if args.from_handover else 0
+        for t in range(t0, n):
             ds.add_frame({
                 "exterior_image_1_left": load_image(ep_dir / "images" / f"{EXTERIOR}_{t:05d}.jpg"),
-                "wrist_image_left": load_image(ep_dir / "images" / f"{wrist}_{t:05d}.jpg"),
+                "wrist_image_left": load_image(ep_dir / "images" / f"{WRIST_LEFT}_{t:05d}.jpg"),
+                "wrist_image_right": load_image(ep_dir / "images" / f"{WRIST_RIGHT}_{t:05d}.jpg"),
                 "joint_position": d["joint_position"][t].astype(np.float32),
                 "gripper_position": np.asarray(d["gripper_position"][t], np.float32).reshape(1),
                 "pipette_state": np.array([d["plunger"][t], d["tip_attached"][t]], np.float32),
@@ -105,8 +112,8 @@ def main():
             })
         ds.save_episode()
         kept += 1
-        frames += n
-        print(f"{ep_dir.parent.name}/{ep_dir.name}: {n} frames, wrist camera {wrist}  '{meta['prompt']}'", flush=True)
+        frames += n - t0
+        print(f"{ep_dir.parent.name}/{ep_dir.name}: {n - t0} frames  '{meta['prompt']}'", flush=True)
     print(f"exported {kept} episodes, {frames} frames -> {out}")
     if skipped:
         print(f"skipped {len(skipped)} failed episodes: {skipped}")
