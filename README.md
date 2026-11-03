@@ -22,6 +22,17 @@ generation and measurement scripts are in `../cad_source/`.
 All work so far is in simulation (Isaac Sim 6.0.1 / Isaac Lab 3.0) on one
 12 GB GPU.
 
+### Demo: π0.5 + RL finisher
+
+![π0.5 hands each step over to an RL teacher: pick tube D1, put it back, pick tube A5, put it back](docs/media/vla_rl_finisher_tubes.gif)
+
+One continuous scene, four steps, all four succeed (2.5× speed; exterior and
+top-wrist cameras). The label in the top-left shows who is acting: **π0.5
+(VLA)** in blue until the hand-over, then the **RL teacher** in green. The tube
+pose comes from the wrist-camera localizer.
+[Full video of all four scenarios](docs/media/vla_rl_finisher_scenarios.mp4)
+(10 MB, all three cameras, including the steps that failed).
+
 ### Approach
 
 ```
