@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,11 @@ OUT = HERE / "start_states_pipette.npz"
 NEAR_M = 0.60                     # the finisher range (as the tray: pi0.5 ends far from the target)
 GRASP_Y = 0.11                    # pipette_expert.PIPETTE_GRASP_Y
 GRASP_BELOW_AXIS = 0.006          # pipette_expert.PIPETTE_GRASP_BELOW_AXIS
+# --held: the expert pick-ups' frames AFTER the close (3+ steps closed, the pipette lifted < 2.5 cm) instead ->
+# start_states_pipette_held.npz, the reverse curriculum of the joint-space pick-up (pipette_grasp_joint)
+HELD = "--held" in sys.argv
+if HELD:
+    OUT = HERE / "start_states_pipette_held.npz"
 
 
 def quat_to_matrix(q):
@@ -65,7 +71,8 @@ def main():
         qq = np.concatenate([d["joint_position"][:, :7], d["finger_position_m"].reshape(len(tcp), -1)[:, :2]], axis=1)
         shift = neighbours.arm_shift(meta)                  # randomized layouts move the arm too
         for t in frames(meta, d, tcp, pp):
-            if np.linalg.norm(tcp[t] - grasp_point(pp[t])) < NEAR_M and pp[t][2] < pp[0][2] + 0.005:   # still lying there
+            lying = pp[t][2] < pp[0][2] + (0.025 if HELD else 0.005)      # still lying there (held: lifted < 2.5 cm)
+            if np.linalg.norm(tcp[t] - grasp_point(pp[t])) < NEAR_M and lying:
                 q.append(qq[t])
                 pip.append(np.concatenate([pp[t][:3] + shift, pp[t][3:]]))
                 tcps.append(tcp[t] + shift)
@@ -81,9 +88,21 @@ def main():
             return range(end)
         return f
 
+    def after_close(meta, d, tcp, pp):
+        closed = d["action"][:, 7] > 0.9
+        closes = np.nonzero(closed)[0]
+        return [t for t in range(int(closes[0]) + 3, len(tcp)) if closed[t]] if len(closes) else []
+
     for run in ("primitives_v2", "primitives_v3", "primitives_v4"):
         for ep in sorted(glob.glob(str(DATA / run / "pick_up_pipette" / "ep_*"))):
-            add(ep, "expert", until_close())
+            add(ep, "expert", after_close if HELD else until_close())
+    if HELD:
+        kinds = np.array(kinds)
+        np.savez(OUT, q=np.array(q, np.float32), pipette=np.array(pip, np.float32), tcp=np.array(tcps, np.float32),
+                 source=np.array(src), kind=kinds, n_expert=int((kinds == "expert").sum()),
+                 neigh=np.array(neigh, np.float32), neigh_names=np.array(neighbours.NAMES))
+        print(f"{len(q)} held start states -> {OUT}")
+        return
     for ep in sorted(glob.glob(str(DATA / "recovery_v1" / "pick_up_pipette" / "ep_*"))):
         add(ep, "recovery", until_close("prefix"))
     for run in ("pilot100_2999", "v2v4_3999", "v2v4_3999_fixed"):

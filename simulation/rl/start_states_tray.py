@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import glob
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +32,11 @@ OUT = HERE / "start_states_tray.npz"
 NEAR_M = 0.60                     # the finisher range (user: widen to ~60 cm, since pi0.5 ends 17-67 cm away)
 TRAY_GRASP_Z = 0.005
 TRAY_HALF = (0.026, 0.012)
+# --held: the expert pick-ups' frames AFTER the close (3+ steps closed, the tray lifted < 4 cm) instead ->
+# start_states_tray_held.npz, the reverse curriculum of the joint-space tray pick-up (tray_grasp_joint)
+HELD = "--held" in sys.argv
+if HELD:
+    OUT = HERE / "start_states_tray_held.npz"
 
 
 def grasp_point(pose):
@@ -64,6 +70,23 @@ def main():
         end = int(np.argmax(d["action"][:, 7] > 0.9)) if before_close and (d["action"][:, 7] > 0.9).any() else len(tcp)
         return [t for t in range(end) if np.linalg.norm(tcp[t] - grasp_point(tp[t])) < NEAR_M]
 
+    def after_close(d, tcp, tp):
+        closed = d["action"][:, 7] > 0.9
+        closes = np.nonzero(closed)[0]
+        if not len(closes):
+            return []
+        return [t for t in range(int(closes[0]) + 3, len(tcp)) if closed[t] and tp[t][2] < tp[0][2] + 0.04]
+
+    if HELD:
+        for run in ("primitives_v2", "primitives_v3", "primitives_v4"):
+            for ep in sorted(glob.glob(str(DATA / run / "pick_up_tray" / "ep_*"))):
+                if json.loads((Path(ep) / "meta.json").read_text()).get("success"):
+                    add(ep, after_close)
+        np.savez(OUT, q=np.array(q, np.float32), tray=np.array(tray, np.float32), tcp=np.array(tcps, np.float32),
+                 source=np.array(src), n_expert=len(q), neigh=np.array(neigh, np.float32),
+                 neigh_names=np.array(neighbours.NAMES))
+        print(f"{len(q)} held start states -> {OUT}")
+        return
     for ep in sorted(glob.glob(str(DATA / "primitives_v2" / "pick_up_tray" / "ep_*"))):
         add(ep, lambda d, tcp, tp: near(d, tcp, tp, before_close=True))
     n_expert = len(q)

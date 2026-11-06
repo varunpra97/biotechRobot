@@ -311,10 +311,13 @@ def run_task(args, r, out, setup=True, tube=None, slot_rc=None, rel=None, client
         near_m, fin_steps, lift_left = INSERT_FINISHER["near_m"], INSERT_FINISHER["steps"], 0
     if task in M6_TASKS:
         near_m, fin_steps, lift_left = M6_FINISHER[task]["near_m"], M6_FINISHER[task]["steps"], 0
+    joint = task == "pick_tube_from_holder" and getattr(args, "joint_teacher", False)
+    if joint:                                        # the no-IK teacher lifts all of it itself
+        fin_steps, lift_left = 180, 0                 # its env episode: 12 s at 15 Hz
     released = False
     if args.finisher:
-        from teacher_finisher import (OPEN_CMD, InsertFinisher, PipetteFinisher, PlaceFinisher, TeacherFinisher,
-                                      TipAttachFinisher, TipPositionFinisher, TrayFinisher)
+        from teacher_finisher import (OPEN_CMD, InsertFinisher, JointTeacherFinisher, PipetteFinisher, PlaceFinisher,
+                                      TeacherFinisher, TipAttachFinisher, TipPositionFinisher, TrayFinisher)
         pose_fn = None
         if args.perceived:
             # the vision pipeline's wrist-camera localizer (its own process, see
@@ -332,6 +335,9 @@ def run_task(args, r, out, setup=True, tube=None, slot_rc=None, rel=None, client
             fin = PlaceFinisher(env, r.planner.kin, env.objects[moved]["path"], slot_rc, pose_fn=pose_fn)
         elif task == "insert_tube_into_bore":
             fin = InsertFinisher(env, r.planner.kin, env.objects[moved]["path"], ex.bores[sleeve], pose_fn=pose_fn)
+        elif joint:
+            fin = JointTeacherFinisher(env, r.planner.kin, env.objects[moved]["path"], pose_fn=pose_fn,
+                                       **({"policy_path": args.joint_policy} if args.joint_policy else {}))
         elif task == "attach_tip":
             fin = TipAttachFinisher(env, r.planner.kin, env.objects[m6["tip"]]["path"])
         elif task in M6_TASKS:
@@ -397,6 +403,8 @@ def run_task(args, r, out, setup=True, tube=None, slot_rc=None, rel=None, client
         closing = a[7] > 0.9 and task not in ("place_tube_into_holder", "insert_tube_into_bore") + M6_TASKS   # held closed
         if task == "place_tube_into_holder" and fin.status()[2] > PLACE_HANDOVER_TILT_DEG:
             return True                              # pi0.5 is tilting the held tube: the teacher places it now
+        if args.handover_entry > 0 and d < args.handover_entry:
+            return True                              # inside the teacher's region: take over now, not after pi0.5 stalls
         return d < near_m and (stalled or closing) or steps >= TASKS[task]
 
     while steps < max_steps and mode == "vla":
@@ -450,6 +458,8 @@ def run_task(args, r, out, setup=True, tube=None, slot_rc=None, rel=None, client
                 done = not fin.closed and gap > 0.009 and np.linalg.norm(tcp_now - fin._vs_bore()[2]) > 0.02
             elif task == "place_tube_into_holder":       # seated while held (d: tip to resting point, lift: height)
                 done = fin.closed and d < PLACE_FINISHER["seated_xy_m"] + 0.0003 and abs(lift) < PLACE_FINISHER["seated_z_m"]
+            elif joint:                                 # the full lift, by the policy
+                done = lift >= 0.058 and tilt < 5.0 and fin.closed and 0.003 < gap < 0.0075   # its env's hold test
             else:
                 done = lift >= 0.03 and tilt < 5.0 and fin.closed and 0.0045 < gap < 0.0075
             if teacher_done is None and done:
@@ -569,11 +579,16 @@ def drive(args):
             if (task, trial) in done:
                 continue
             log = out / "logs" / f"{task}_{trial:03d}.log"
-            cmd = [sys.executable, str(Path(__file__).resolve()), "--worker", "--task", task, "--trial", str(trial),
-                   "--out", str(out), "--server", args.server, "--replan", str(args.replan),
-                   "--checkpoint-label", args.checkpoint_label] + (["--fixed-layout"] if args.fixed_layout else [])                 + (["--pick-slot", args.pick_slot] if args.pick_slot else []) \
-                + (["--finisher"] if args.finisher else []) + (["--perceived"] if args.perceived else []) \
-                + ["--localizer-port", str(args.localizer_port), "--finisher-near", str(args.finisher_near)]
+            cmd = ([sys.executable, str(Path(__file__).resolve()), "--worker", "--task", task, "--trial", str(trial),
+                    "--out", str(out), "--server", args.server, "--replan", str(args.replan),
+                    "--checkpoint-label", args.checkpoint_label]
+                   + (["--fixed-layout"] if args.fixed_layout else [])
+                   + (["--pick-slot", args.pick_slot] if args.pick_slot else [])
+                   + (["--finisher"] if args.finisher else []) + (["--perceived"] if args.perceived else [])
+                   + ["--localizer-port", str(args.localizer_port), "--finisher-near", str(args.finisher_near)]
+                   + (["--joint-teacher"] if args.joint_teacher else [])
+                   + ["--handover-entry", str(args.handover_entry)]
+                   + (["--joint-policy", args.joint_policy] if args.joint_policy else []))
             t0 = time.time()
             with open(log, "w", encoding="utf-8") as f:
                 rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, cwd=str(HERE)).returncode
@@ -605,8 +620,15 @@ def main():
     ap.add_argument("--localizer-port", type=int, default=5577)
     ap.add_argument("--finisher", action="store_true",
                     help="tube picks: the RL teacher (rl/teacher_policy.pt) finishes when the VLA stalls near the tube")
+    ap.add_argument("--joint-teacher", action="store_true",
+                    help="tube picks: the joint-space teacher (rl/tube_joint_policy.pt, no IK, no scripted lift)")
     ap.add_argument("--finisher-near", type=float, default=FINISHER_NEAR_M,
                     help="tube picks: hand over within this of the grasp point (M1 teacher: trained from 25 cm)")
+    ap.add_argument("--joint-policy", default=None,
+                    help="with --joint-teacher: this TorchScript policy instead of rl/tube_joint_policy.pt")
+    ap.add_argument("--handover-entry", type=float, default=0.0,
+                    help="with --finisher: hand over as soon as the hand is this close to the target (m), without "
+                         "waiting for pi0.5 to stall or close (0: off)")
     ap.add_argument("--pick-slot", default=None, help="the tube to pick stands in this slot (e.g. B1), every trial")
     ap.add_argument("--fixed-layout", action="store_true",
                     help="every trial in the default arrangement (the pilot data's), not a sampled layout")

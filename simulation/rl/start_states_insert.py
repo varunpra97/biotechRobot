@@ -30,6 +30,11 @@ if "--near" in sys.argv:          # M5: 0.30 (the carry from the rack, so pi0.5 
     NEAR_M = float(sys.argv[sys.argv.index("--near") + 1])
 ENTERED_S = 0.0                   # tip deeper than the bore's axis point (s = 0; opening at s ~ +16 mm): already inside
 SEATED_S = -0.010                 # an inserted tube's tip ends below this
+# --deep: the held frames INSIDE the bore instead (s <= ENTERED_S, down to seated, gripper still closed) -> the
+# reverse curriculum of the joint-space insert (tube_insert_joint), where releasing and backing off are learned
+DEEP = "--deep" in sys.argv
+if DEEP:
+    OUT = HERE / "start_states_insert_deep.npz"
 
 
 def main():
@@ -65,7 +70,9 @@ def main():
         closed = d["action"][:, 7] > 0.9
         opening = point + BORES["opening_s"][b] * axis
         for t in range(len(tp)):
-            if closed[t] and s[t] > ENTERED_S and np.linalg.norm(tp[t, :3] - opening) < NEAR_M:
+            inside = ((ENTERED_S >= s[t] >= SEATED_S - 0.008 and radial[t] < 0.003) if DEEP     # in the bore, on its axis
+                      else (s[t] > ENTERED_S and np.linalg.norm(tp[t, :3] - opening) < NEAR_M))
+            if closed[t] and inside:
                 q.append(qq[t])
                 tube.append(tp[t])
                 bore.append(b)

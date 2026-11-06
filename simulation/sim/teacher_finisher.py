@@ -572,3 +572,53 @@ class TipPositionFinisher(_KinematicFinisher):
         obs = np.concatenate([rel * 10.0, [radial * 100.0], [dh * 100.0], [above * 10.0], [np.clip(gap * 1000.0, -5, 5)],
                               [ang / 30.0], [float(self.kind)], q[:7] - self.q_home, qd[:7] * 0.1, self.last])
         return np.clip(np.nan_to_num(obs), -10.0, 10.0).astype(np.float32)
+
+
+# ------------------------------------------------------------------ joint-space tube pick (no IK)
+JOINT_POLICY = Path(__file__).resolve().parents[1] / "rl" / "tube_joint_policy.pt"
+JOINT_STEP_RAD = 0.02                            # rl/tube_grasp_joint: joint_step_rad (must match: run 6 on)
+JOINT_LIFT_GOAL = 0.06
+
+
+class JointTeacherFinisher(TeacherFinisher):
+    """The joint-space tube-pick teacher (rl/tube_grasp_joint): the policy's 8 outputs are changes of the 7 joint
+    targets and the gripper, sent to the arm as they are -- no IK, no held orientation, no scripted lift (it lifts
+    the full JOINT_LIFT_GOAL itself). Observation (39) as its env: TeacherFinisher's 29 with the 8-D last action,
+    plus the hand's z and y axes."""
+
+    def __init__(self, env, kin, tube_path, policy_path=JOINT_POLICY, pose_fn=None):
+        super().__init__(env, kin, tube_path, policy_path, pose_fn)
+        self.last = np.zeros(8)
+
+    def start(self):
+        self.last = np.zeros(8)
+        self.closed = False
+        self.prev_tip = None
+
+    def observation(self):
+        base = super().observation()                   # 25 + last action (8)
+        q, _ = self._joints()
+        _, R = self.kin.tcp(q[:7])
+        return np.clip(np.concatenate([base, R[:, 2], R[:, 1]]), -10.0, 10.0).astype(np.float32)
+
+    def action(self):
+        torch = self.torch
+        with torch.inference_mode():
+            a = self.policy(torch.from_numpy(self.observation()).unsqueeze(0))[0].numpy().astype(float)
+        a = np.clip(a, -1.0, 1.0)
+        self.last = a.copy()
+        return self._joint_action(a[:7] * JOINT_STEP_RAD, a[7] > 0.0)
+
+    def hold_action(self):
+        return self._joint_action(np.zeros(7), True)
+
+    def lift_action(self):                           # nothing scripted: hold
+        return self.hold_action()
+
+    def _joint_action(self, dq, close):
+        q, _ = self._joints()
+        q_cmd = np.asarray(self.env.q_cmd[:7], float)
+        lead = np.clip(q_cmd + dq - q[:7], -MAX_LEAD, MAX_LEAD)
+        q_goal = np.clip(q[:7] + lead, self.q_lo, self.q_hi)
+        self.closed = bool(close)
+        return self.env.action(lab_env.delta_to_droid_velocity(q_goal - q_cmd), gripper=1.0 if self.closed else OPEN_CMD)
