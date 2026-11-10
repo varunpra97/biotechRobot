@@ -1,0 +1,202 @@
+[
+ {
+  "round": 0,
+  "beta": 1.0,
+  "samples": 225280,
+  "loss_joints": 0.02537,
+  "loss_grip": 0.0035,
+  "rollout_s": 144.7,
+  "student": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  },
+  "teacher": {
+   "success": 4100,
+   "fail": 5,
+   "timeout": 1,
+   "rate": 0.999
+  }
+ },
+ {
+  "round": 1,
+  "beta": 0.5,
+  "samples": 450560,
+  "loss_joints": 0.05636,
+  "loss_grip": 0.00537,
+  "rollout_s": 172.9,
+  "student": {
+   "success": 247,
+   "fail": 596,
+   "timeout": 247,
+   "rate": 0.227
+  },
+  "teacher": {
+   "success": 1507,
+   "fail": 2,
+   "timeout": 2,
+   "rate": 0.997
+  }
+ },
+ {
+  "round": 2,
+  "beta": 0.35,
+  "samples": 675840,
+  "loss_joints": 0.07002,
+  "loss_grip": 0.00598,
+  "rollout_s": 160.1,
+  "student": {
+   "success": 189,
+   "fail": 88,
+   "timeout": 730,
+   "rate": 0.188
+  },
+  "teacher": {
+   "success": 708,
+   "fail": 9,
+   "timeout": 96,
+   "rate": 0.871
+  }
+ },
+ {
+  "round": 3,
+  "beta": 0.2,
+  "samples": 901120,
+  "loss_joints": 0.07287,
+  "loss_grip": 0.00786,
+  "rollout_s": 153.9,
+  "student": {
+   "success": 1529,
+   "fail": 63,
+   "timeout": 564,
+   "rate": 0.709
+  },
+  "teacher": {
+   "success": 613,
+   "fail": 1,
+   "timeout": 44,
+   "rate": 0.932
+  }
+ },
+ {
+  "round": 4,
+  "beta": 0.050000000000000044,
+  "samples": 1126400,
+  "loss_joints": 0.0709,
+  "loss_grip": 0.03023,
+  "rollout_s": 166.1,
+  "student": {
+   "success": 3464,
+   "fail": 36,
+   "timeout": 227,
+   "rate": 0.929
+  },
+  "teacher": {
+   "success": 180,
+   "fail": 1,
+   "timeout": 8,
+   "rate": 0.952
+  }
+ },
+ {
+  "round": 5,
+  "beta": 0.0,
+  "samples": 1351680,
+  "loss_joints": 0.06785,
+  "loss_grip": 0.0377,
+  "rollout_s": 146.9,
+  "student": {
+   "success": 4196,
+   "fail": 35,
+   "timeout": 69,
+   "rate": 0.976
+  },
+  "teacher": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  }
+ },
+ {
+  "round": 6,
+  "beta": 0.0,
+  "samples": 1576960,
+  "loss_joints": 0.06091,
+  "loss_grip": 0.04053,
+  "rollout_s": 154.6,
+  "student": {
+   "success": 4152,
+   "fail": 34,
+   "timeout": 41,
+   "rate": 0.982
+  },
+  "teacher": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  }
+ },
+ {
+  "round": 7,
+  "beta": 0.0,
+  "samples": 1802240,
+  "loss_joints": 0.0588,
+  "loss_grip": 0.03606,
+  "rollout_s": 147.9,
+  "student": {
+   "success": 4307,
+   "fail": 27,
+   "timeout": 46,
+   "rate": 0.983
+  },
+  "teacher": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  }
+ },
+ {
+  "round": 8,
+  "beta": 0.0,
+  "samples": 2027520,
+  "loss_joints": 0.05496,
+  "loss_grip": 0.04652,
+  "rollout_s": 150.6,
+  "student": {
+   "success": 4235,
+   "fail": 14,
+   "timeout": 23,
+   "rate": 0.991
+  },
+  "teacher": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  }
+ },
+ {
+  "round": 9,
+  "beta": 0.0,
+  "samples": 2252800,
+  "loss_joints": 0.04512,
+  "loss_grip": 0.03056,
+  "rollout_s": 151.6,
+  "student": {
+   "success": 4365,
+   "fail": 18,
+   "timeout": 23,
+   "rate": 0.991
+  },
+  "teacher": {
+   "success": 0,
+   "fail": 0,
+   "timeout": 0,
+   "rate": 0.0
+  }
+ }
+]
